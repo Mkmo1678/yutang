@@ -18,7 +18,7 @@ public class WinDesktopApi {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern IntPtr FindWindow(string c, string w);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindowEx(IntPtr p, IntPtr c, string w);
+  public static extern IntPtr FindWindowEx(IntPtr p, IntPtr c, string cls, string win);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetClassName(IntPtr h, StringBuilder s, int max);
   [DllImport("user32.dll")]
