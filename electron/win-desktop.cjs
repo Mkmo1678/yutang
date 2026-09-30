@@ -44,21 +44,23 @@ $hDesk = [WinDesktopApi]::OpenInputDesktop(0, $false, 0x01FF)
 Log "OpenInputDesktop=$hDesk"
 if ($hDesk -ne [IntPtr]::Zero) { [void][WinDesktopApi]::SetThreadDesktop($hDesk) }
 
-# 枚举所有顶层窗口，找 Progman 与第一个带 SHELLDLL_DefView 的窗口
+# 枚举所有顶层窗口，找 Progman、第一个 WorkerW、带 SHELLDLL_DefView 的窗口
 $script:progman = [IntPtr]::Zero
 $script:defOwner = [IntPtr]::Zero
+$script:firstWorker = [IntPtr]::Zero
 $cb = [WinDesktopApi+EnumWindowsProc]{
   param($h, $l)
   $sb = New-Object System.Text.StringBuilder 256
   [void][WinDesktopApi]::GetClassName($h, $sb, 256)
   $cn = $sb.ToString()
   if ($cn -eq 'Progman') { $script:progman = $h }
+  if ($cn -eq 'WorkerW' -and $script:firstWorker -eq [IntPtr]::Zero) { $script:firstWorker = $h }
   $dv = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
   if ($dv -ne [IntPtr]::Zero) { $script:defOwner = $h }
   return $true
 }
 [void][WinDesktopApi]::EnumWindows($cb, [IntPtr]::Zero)
-Log "progman=$($script:progman) defOwner=$($script:defOwner)"
+Log "progman=$($script:progman) defOwner=$($script:defOwner) firstWorker=$($script:firstWorker)"
 
 if ($script:progman -ne [IntPtr]::Zero) {
   $res = [IntPtr]::Zero
@@ -66,24 +68,19 @@ if ($script:progman -ne [IntPtr]::Zero) {
   Start-Sleep -Milliseconds 500
 }
 
-# 在 defOwner 之后找 WorkerW
+# 在 defOwner 之后找 WorkerW；回退到枚举到的第一个 WorkerW；不再回退 Progman（直接挂会卡死）
 $parent = [IntPtr]::Zero
 if ($script:defOwner -ne [IntPtr]::Zero) {
   $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $script:defOwner, 'WorkerW', [IntPtr]::Zero)
 }
-# 回退：直接找一个 WorkerW
-if ($parent -eq [IntPtr]::Zero) {
-  $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, 'WorkerW', [IntPtr]::Zero)
-}
-# 再回退：直接挂 Progman
-if ($parent -eq [IntPtr]::Zero) { $parent = $script:progman }
+if ($parent -eq [IntPtr]::Zero) { $parent = $script:firstWorker }
 
 Log "chosen parent=$parent"
 if ($parent -ne [IntPtr]::Zero) {
   [void][WinDesktopApi]::SetParent($child, $parent)
   Log "SetParent ok"
 } else {
-  Log "fallback no parent"
+  Log "fallback no WorkerW"
 }
 } catch {
   Log "ERROR: $($_.Exception.Message)"
@@ -101,7 +98,7 @@ function setDesktopLevel(handle, enabled) {
   const result = spawnSync(
     psExe,
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-    { windowsHide: true, timeout: 20000 }
+    { windowsHide: true, timeout: 30000 }
   );
   if (result.error) throw result.error;
   if (result.status !== 0) {
