@@ -1,7 +1,7 @@
 'use strict';
 
 // Windows 桌面层：把窗口挂到 WorkerW/Progman（桌面图标层之下、壁纸层）。
-// 关键：spawn 出的 PowerShell 线程可能不在交互桌面，先 OpenInputDesktop/SetThreadDesktop 切到输入桌面。
+// OpenInputDesktop 切到交互桌面；枚举定位 Progman/WorkerW；句柄用 int64 解析。
 
 const { spawnSync } = require('node:child_process');
 
@@ -43,49 +43,47 @@ if ('detach' -eq '${enabled ? 'attach' : 'detach'}') {
 $hDesk = [WinDesktopApi]::OpenInputDesktop(0, $false, 0x01FF)
 Log "OpenInputDesktop=$hDesk"
 if ($hDesk -ne [IntPtr]::Zero) { [void][WinDesktopApi]::SetThreadDesktop($hDesk) }
-$progman = [WinDesktopApi]::FindWindow('Progman', $null)
-Log "FindWindow Progman=$progman"
-$script:tops = New-Object System.Collections.ArrayList
-$cb1 = [WinDesktopApi+EnumWindowsProc]{
+
+# 枚举所有顶层窗口，找 Progman 与第一个带 SHELLDLL_DefView 的窗口
+$script:progman = [IntPtr]::Zero
+$script:defOwner = [IntPtr]::Zero
+$cb = [WinDesktopApi+EnumWindowsProc]{
   param($h, $l)
   $sb = New-Object System.Text.StringBuilder 256
   [void][WinDesktopApi]::GetClassName($h, $sb, 256)
-  [void]$script:tops.Add("$h|$($sb.ToString())")
+  $cn = $sb.ToString()
+  if ($cn -eq 'Progman') { $script:progman = $h }
+  $dv = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+  if ($dv -ne [IntPtr]::Zero) { $script:defOwner = $h }
   return $true
 }
-[void][WinDesktopApi]::EnumWindows($cb1, [IntPtr]::Zero)
-Log "top count=$($script:tops.Count)"
-foreach ($t in $script:tops) { if ($t -match 'Progman|WorkerW|Shell|DefView') { Log "  $t" } }
-if ($progman -eq [IntPtr]::Zero) {
-  foreach ($t in $script:tops) {
-    if ($t -match '^[^|]+\|Progman$') { $progman = [IntPtr]($t.Split('|')[0]); Log "enum Progman=$progman" }
-  }
-}
-if ($progman -ne [IntPtr]::Zero) {
+[void][WinDesktopApi]::EnumWindows($cb, [IntPtr]::Zero)
+Log "progman=$($script:progman) defOwner=$($script:defOwner)"
+
+if ($script:progman -ne [IntPtr]::Zero) {
   $res = [IntPtr]::Zero
-  [void][WinDesktopApi]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::One, 0x0002, 1000, [ref]$res)
+  [void][WinDesktopApi]::SendMessageTimeout($script:progman, 0x052C, [IntPtr]::Zero, [IntPtr]::One, 0x0002, 1000, [ref]$res)
   Start-Sleep -Milliseconds 500
 }
-$parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, 'WorkerW', [IntPtr]::Zero)
-Log "direct WorkerW=$parent"
-if ($parent -eq [IntPtr]::Zero) {
-  $script:found = [IntPtr]::Zero
-  $cb2 = [WinDesktopApi+EnumWindowsProc]{
-    param($h, $l)
-    $dv = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
-    if ($dv -ne [IntPtr]::Zero) { $script:found = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $h, 'WorkerW', [IntPtr]::Zero) }
-    return $true
-  }
-  [void][WinDesktopApi]::EnumWindows($cb2, [IntPtr]::Zero)
-  if ($script:found -ne [IntPtr]::Zero) { $parent = $script:found }
+
+# 在 defOwner 之后找 WorkerW
+$parent = [IntPtr]::Zero
+if ($script:defOwner -ne [IntPtr]::Zero) {
+  $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $script:defOwner, 'WorkerW', [IntPtr]::Zero)
 }
-if ($parent -eq [IntPtr]::Zero -and $progman -ne [IntPtr]::Zero) { $parent = $progman }
+# 回退：直接找一个 WorkerW
+if ($parent -eq [IntPtr]::Zero) {
+  $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, 'WorkerW', [IntPtr]::Zero)
+}
+# 再回退：直接挂 Progman
+if ($parent -eq [IntPtr]::Zero) { $parent = $script:progman }
+
 Log "chosen parent=$parent"
 if ($parent -ne [IntPtr]::Zero) {
   [void][WinDesktopApi]::SetParent($child, $parent)
   Log "SetParent ok"
 } else {
-  Log "fallback"
+  Log "fallback no parent"
 }
 } catch {
   Log "ERROR: $($_.Exception.Message)"
