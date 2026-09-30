@@ -78,7 +78,11 @@ if ($parent -eq [IntPtr]::Zero) { $parent = $script:firstWorker }
 Log "chosen parent=$parent"
 if ($parent -ne [IntPtr]::Zero) {
   [void][WinDesktopApi]::SetParent($child, $parent)
-  Log "SetParent ok"
+  # 挂为子窗口后坐标系改变，立即重置为 0,0 全屏并显示
+  Add-Type -AssemblyName System.Windows.Forms
+  $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0, 0, $b.Width, $b.Height, 0x0040 -bor 0x0010 -bor 0x0004)
+  Log "SetParent ok, resized to $($b.Width)x$($b.Height)"
 } else {
   Log "fallback no WorkerW"
 }
