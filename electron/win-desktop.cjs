@@ -1,13 +1,13 @@
 'use strict';
 
-// Windows 桌面层：把窗口挂到 WorkerW（桌面图标层之下、壁纸层）。
-// 原理同动态壁纸软件：向 Progman 发 0x052C 生成 WorkerW，枚举找到它，再 SetParent。
+// Windows 桌面层：尽量把窗口挂到 WorkerW（桌面图标层之下、壁纸层）。
 // 用系统自带 PowerShell + C# P/Invoke，运行时编译，无需随包分发原生二进制。
+// 多种查找路径；找不到时降级（不报错），保持全屏+鼠标穿透。
 
 const { spawnSync } = require('node:child_process');
 
 function buildPowerShell(hwnd, enabled) {
-  return `$ErrorActionPreference = 'Stop'
+  return `$ErrorActionPreference = 'Continue'
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -22,33 +22,43 @@ public class WinDesktopApi {
   [DllImport("user32.dll")]
   public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
   [DllImport("user32.dll")]
-  public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+  public static extern bool SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
 }
 '@
 $child = [IntPtr][int64]'${hwnd}'
-if ('${enabled ? 'attach' : 'detach'}' -eq 'detach') {
+if ('detach' -eq '${enabled ? 'attach' : 'detach'}') {
   [void][WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
   exit 0
 }
 $progman = [WinDesktopApi]::FindWindow('Progman', $null)
-$res = [IntPtr]::Zero
-[void][WinDesktopApi]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 1000, [ref]$res)
-Start-Sleep -Milliseconds 400
-$wallpaperWorker = [IntPtr]::Zero
-$callback = [WinDesktopApi+EnumWindowsProc]{
-  param($hWnd, $lParam)
-  $defView = [WinDesktopApi]::FindWindowEx($hWnd, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
-  if ($defView -ne [IntPtr]::Zero) {
-    $script:wallpaperWorker = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $hWnd, 'WorkerW', $null)
-  }
-  return $true
+if ($progman -ne [IntPtr]::Zero) {
+  $res = [IntPtr]::Zero
+  [void][WinDesktopApi]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 1000, [ref]$res)
+  Start-Sleep -Milliseconds 400
 }
-[void][WinDesktopApi]::EnumWindows($callback, [IntPtr]::Zero)
-# 现代 Win11 常找不到独立 WorkerW，回退直接挂 Progman，同样位于图标下层
-$parent = $wallpaperWorker
-if ($parent -eq [IntPtr]::Zero) { $parent = $progman }
-if ($parent -eq [IntPtr]::Zero) { Write-Error 'desktop layer not found'; exit 1 }
-[void][WinDesktopApi]::SetParent($child, $parent)
+# 方式1：直接找 WorkerW 顶层窗口
+$parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, 'WorkerW', [IntPtr]::Zero)
+# 方式2：通过 SHELLDLL_DefView 找其后的 WorkerW
+if ($parent -eq [IntPtr]::Zero) {
+  $script:found = [IntPtr]::Zero
+  $cb = [WinDesktopApi+EnumWindowsProc]{
+    param($h, $l)
+    $defView = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+    if ($defView -ne [IntPtr]::Zero) {
+      $script:found = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $h, 'WorkerW', [IntPtr]::Zero)
+    }
+    return $true
+  }
+  [void][WinDesktopApi]::EnumWindows($cb, [IntPtr]::Zero)
+  if ($script:found -ne [IntPtr]::Zero) { $parent = $script:found }
+}
+# 方式3：回退直接挂 Progman
+if ($parent -eq [IntPtr]::Zero -and $progman -ne [IntPtr]::Zero) { $parent = $progman }
+if ($parent -ne [IntPtr]::Zero) {
+  [void][WinDesktopApi]::SetParent($child, $parent)
+} else {
+  Write-Output 'fallback'
+}
 exit 0
 `;
 }
@@ -64,6 +74,7 @@ function setDesktopLevel(handle, enabled) {
     { windowsHide: true, timeout: 20000 }
   );
   if (result.error) throw result.error;
+  // 脚本找不到桌面层时输出 fallback 并以 0 退出，不再视为错误
   if (result.status !== 0) {
     const detail = (result.stderr || '').toString().trim() || `PowerShell exited ${result.status}`;
     throw new Error(detail);
