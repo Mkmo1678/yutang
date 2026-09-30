@@ -65,7 +65,12 @@
     "win": {
       "icon": "electron/assets/app-icon.ico",
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -88,6 +93,10 @@
           "pond-pointer"
         ]
       }
-    ]
+    ],
+    "publish": {
+      "provider": "github",
+      "releaseType": "release"
+    }
   }
 }

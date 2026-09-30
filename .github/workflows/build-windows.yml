@@ -1,14 +1,32 @@
-name: Build Windows EXE
+name: 构建 Windows 安装包
 
-# 在原生 Windows 环境打包，产出标准 NSIS 安装包（本机 Linux 无 wine 时用此方式）。
+# 用法：
+#  - 手动：仓库 → Actions → “构建 Windows 安装包” → Run workflow，
+#         勾选“完成后发布为 GitHub Release”，约3~6分钟得到 Setup.exe；
+#  - 自动：push 到 main 且改动了 src/electron/package.json 时，自动构建（仅产物，不发 Release）。
+
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "完成后发布为 GitHub Release（exe 永久下载）"
+        type: boolean
+        default: true
   push:
     branches: [main]
+    paths:
+      - "src/**"
+      - "electron/**"
+      - "package.json"
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -30,12 +48,22 @@ jobs:
       - name: 构建前端
         run: pnpm build
 
-      - name: 打包 Windows NSIS 安装包
-        run: npx electron-builder --win nsis --x64 --publish never
+      - name: 打包 Windows 安装包
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.release }}" -eq "true") {
+            Write-Host ">> 手动触发：构建并发布 GitHub Release"
+            npx electron-builder --win nsis --x64
+          } else {
+            Write-Host ">> 自动触发：仅构建（不发 Release）"
+            npx electron-builder --win nsis --x64 --publish never
+          }
 
-      - name: 上传安装包
+      - name: 上传安装包（兜底，Action 产物）
         uses: actions/upload-artifact@v4
         with:
-          name: 浮生摸鱼桌面-Win安装包
+          name: Win安装包
           path: release/*.exe
           if-no-files-found: error
