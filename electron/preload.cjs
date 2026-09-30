@@ -23,4 +23,5 @@ contextBridge.exposeInMainWorld('pondDesktop', Object.freeze({
   quit: invoke('pond:quit'),
   onState: subscribe('pond:state'),
   onPointer: subscribe('pond:pointer'),
+  onPower: subscribe('pond:power'),
 }));

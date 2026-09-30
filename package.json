@@ -12,6 +12,7 @@
     "test": "node --test tests/*.test.js",
     "desktop": "pnpm build && pnpm build:native && electron .",
     "package:mac": "pnpm build && pnpm build:native && electron-builder --mac dir --arm64",
+    "package:win": "pnpm build && electron-builder --win nsis --x64",
     "build:native": "node electron/build-native.cjs",
     "test:desktop": "node --test electron/policy.test.cjs",
     "test:performance": "node electron/performance-smoke.cjs --matrix",
@@ -60,6 +61,22 @@
       "target": "dir",
       "identity": "-",
       "notarize": false
+    },
+    "win": {
+      "icon": "electron/assets/app-icon.ico",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "浮生摸鱼桌面",
+      "deleteAppDataOnUninstall": false
     },
     "asar": true,
     "extraResources": [

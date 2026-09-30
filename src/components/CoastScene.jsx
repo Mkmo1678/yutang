@@ -38,7 +38,7 @@ const CoastScene=forwardRef(function CoastScene({options,desktop,mode,onChange,n
     };
     const draw=t=>{
       frame=0;if(dead||document.hidden)return;
-      const o=latest.current.options,interval=o.quality==='low'||o.reducedMotion?1000/30:1000/60;
+      const o=latest.current.options,targetFps=o.lowPower?24:(o.quality==='low'||o.reducedMotion)?30:60,interval=1000/targetFps;
       if(next&&t+2<next){frame=requestAnimationFrame(draw);return}
       next=t+interval-2;
       const dt=last?Math.min(.05,(t-last)/1000):1/60;last=t;

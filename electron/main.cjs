@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, Menu, Tray, nativeImage, screen, globalShortcut, ipcMain, systemPreferences } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, screen, globalShortcut, ipcMain, systemPreferences, powerMonitor } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -10,6 +10,7 @@ app.setName('浮生锦鲤池');
 const SHORTCUT = 'CommandOrControl+Shift+K';
 const FEED_SHORTCUT = 'CommandOrControl+Shift+F';
 const isMac = process.platform === 'darwin';
+const isWin = process.platform === 'win32';
 const WINDOW_MIN = [560, 420];
 let windowTransition = Promise.resolve();
 let pondWindow, tray, nativeWindow, normalBounds, cursorTimer, permissionTimer, pointerProcess;
@@ -17,6 +18,7 @@ let quitting = false;
 let globalGeneration = 0;
 let lastCursor = '';
 let nativeError = '';
+let power = { onBattery: false, suspended: false };
 let state = {
   isDesktop: true, desktopMode: false, globalInteraction: false,
   globalInteractionStatus: 'disabled', launchAtLogin: false,
@@ -41,7 +43,7 @@ if (!app.isPackaged && process.env.VITE_DEV_SERVER_URL) {
 function currentState() {
   const display = state.desktopMode || !pondWindow || pondWindow.isDestroyed()
     ? screen.getPrimaryDisplay() : screen.getDisplayMatching(pondWindow.getBounds());
-  return { ...state, fullScreen: !!pondWindow?.isFullScreen(), visible: !!pondWindow?.isVisible(), minimized: !!pondWindow?.isMinimized(), display: displayMetrics(display) };
+  return { ...state, ...power, fullScreen: !!pondWindow?.isFullScreen(), visible: !!pondWindow?.isVisible(), minimized: !!pondWindow?.isMinimized(), display: displayMetrics(display) };
 }
 function publish() {
   if (pondWindow && !pondWindow.isDestroyed()) pondWindow.webContents.send('pond:state', currentState());
@@ -100,8 +102,8 @@ function applyDesktopMode(enabled) {
     catch (error) { placementError = `桌面层切换失败：${error.message}`; }
     if (isMac) app.dock.hide();
   } else {
+    try { nativeWindow?.setDesktopLevel(pondWindow.getNativeWindowHandle(), false); } catch { /* Detach best effort. */ }
     if (isMac) {
-      try { nativeWindow?.setDesktopLevel(pondWindow.getNativeWindowHandle(), false); } catch { /* Restore the ordinary window controls even if the addon failed. */ }
       pondWindow.setVisibleOnAllWorkspaces(false);
       pondWindow.setHiddenInMissionControl(false);
       pondWindow.setWindowButtonVisibility(true);
@@ -287,6 +289,18 @@ function updateTray() {
   ]));
 }
 
+function broadcastPower() {
+  if (pondWindow && !pondWindow.isDestroyed()) pondWindow.webContents.send('pond:power', { ...power });
+}
+function setupPowerMonitor() {
+  try { power.onBattery = !powerMonitor.isOnACPower(); } catch { /* Desktops report AC. */ }
+  powerMonitor.on('on-battery', () => { power.onBattery = true; broadcastPower(); });
+  powerMonitor.on('on-ac', () => { power.onBattery = false; power.suspended = false; broadcastPower(); });
+  powerMonitor.on('suspend', () => { power.suspended = true; broadcastPower(); });
+  powerMonitor.on('resume', () => { power.suspended = false; broadcastPower(); });
+  powerMonitor.on('lock-screen', () => { power.suspended = true; broadcastPower(); });
+  powerMonitor.on('unlock-screen', () => { power.suspended = false; broadcastPower(); });
+}
 function registerIPC() {
   const handle = (channel, action) => ipcMain.handle(channel, (event, ...args) => {
     if (!pondWindow || event.sender !== pondWindow.webContents || event.senderFrame !== pondWindow.webContents.mainFrame || !allowedEntry(event.senderFrame.url, entryURL)) {
@@ -310,7 +324,9 @@ function createWindow() {
   const { workArea } = screen.getPrimaryDisplay();
   pondWindow = new BrowserWindow({
     width: Math.min(1380, workArea.width - 60), height: Math.min(900, workArea.height - 70),
-    minWidth: WINDOW_MIN[0], minHeight: WINDOW_MIN[1], show: false, frame: true,
+    minWidth: WINDOW_MIN[0], minHeight: WINDOW_MIN[1], show: false,
+    frame: isWin ? false : true,
+    transparent: isWin,
     resizable: true, movable: true, fullscreenable: true, minimizable: true, closable: true,
     ...(isMac ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } } : {}),
     title: '浮生 · 摸鱼桌面', backgroundColor: '#1d302e',
@@ -351,6 +367,9 @@ else {
     if (isMac) {
       try { nativeWindow = require(path.join(nativeDir, 'pond-window.node')); state.desktopSupported = true; }
       catch { nativeError = '原生桌面模块尚未构建，请先运行 npm run build:native；当前可使用窗口预览。'; }
+    } else if (isWin) {
+      try { nativeWindow = require('./win-desktop.cjs'); state.desktopSupported = true; }
+      catch (error) { nativeError = `Windows 桌面层加载失败：${error.message}`; }
     }
     if (state.launchAtLoginSupported) state.launchAtLogin = app.getLoginItemSettings().openAtLogin;
     tray = new Tray(makeTrayIcon());
@@ -362,6 +381,7 @@ else {
       { label: '窗口', submenu: [{ role: 'minimize', label: '最小化窗口' }, { role: 'togglefullscreen', label: '切换全屏' }, { label: '隐藏风景窗口', click: hideWindow }, { label: '打开风景控制台', click: showControls }] },
     ] : []));
     registerIPC();
+    setupPowerMonitor();
     createWindow();
     state.shortcutAvailable = globalShortcut.register(SHORTCUT, showControls);
     state.feedShortcutAvailable = globalShortcut.register(FEED_SHORTCUT, () => feed('shortcut'));

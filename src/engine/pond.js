@@ -89,7 +89,9 @@ export class PondEngine extends KoiRenderer {
   tick(timestamp) {
     this.frame = 0;
     if (!this.running || this.destroyed || document.hidden) return;
-    const interval = this.options.quality === 'low' || this.options.reducedMotion ? 1000 / 30 : 1000 / 60;
+    const targetFps = this.options.lowPower ? 24
+      : (this.options.quality === 'low' || this.options.reducedMotion) ? 30 : 60;
+    const interval = 1000 / targetFps;
     if (this.previousRaf) this.rafInterval = this.rafInterval * .9 + Math.min(100, timestamp - this.previousRaf) * .1;
     this.previousRaf = timestamp;
     // At 60 Hz render every vsync; a second wall-clock gate would mistake GPU jitter

@@ -8,7 +8,7 @@ export function writeStore(key, value) {
 
 export const DEFAULT_SETTINGS = Object.freeze({
   season: 'auto', weather: 'auto', day: 'auto', fishCount: 12, fishSize: 1, turtleCount: 0, quality: 'high',
-  reducedMotion: false, sound: false, volume: 0.18,
+  reducedMotion: false, lowPower: false, autoLowPower: true, sound: false, volume: 0.18,
 });
 const WEATHER_TYPES = ['sunny', 'cloudy', 'rainy', 'snowy', 'foggy', 'stormy'];
 const MAX_CACHE_AGE_MS = 24 * 60 * 60 * 1000;
@@ -31,6 +31,8 @@ export function loadSettings() {
     turtleCount: Math.round(clampNumber(source.turtleCount, 0, 4, 0)),
     quality: pick('quality', ['high', 'low']),
     reducedMotion: typeof source.reducedMotion === 'boolean' ? source.reducedMotion : false,
+    lowPower: typeof source.lowPower === 'boolean' ? source.lowPower : false,
+    autoLowPower: typeof source.autoLowPower === 'boolean' ? source.autoLowPower : true,
     sound: typeof source.sound === 'boolean' ? source.sound : false,
     volume: clampNumber(source.volume, 0, 0.6, DEFAULT_SETTINGS.volume),
   };
