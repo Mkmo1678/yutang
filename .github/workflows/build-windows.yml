@@ -31,7 +31,7 @@ jobs:
         run: pnpm build
 
       - name: 打包 Windows NSIS 安装包
-        run: npx electron-builder --win nsis --x64
+        run: npx electron-builder --win nsis --x64 --publish never
 
       - name: 上传安装包
         uses: actions/upload-artifact@v4
