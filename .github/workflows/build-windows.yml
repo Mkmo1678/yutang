@@ -54,7 +54,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.release }}" -eq "true") {
-            Write-Host ">> 手动触发：构建并发布 GitHub Release"
+            $ver = (Get-Content package.json | ConvertFrom-Json).version
+            $tag = "v$ver"
+            Write-Host ">> 手动触发：构建并发布 GitHub Release ($tag)"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            if (-not (git tag -l $tag)) {
+              git tag -a $tag -m $tag
+              git push origin $tag
+            }
             npx electron-builder --win nsis --x64 --publish always
           } else {
             Write-Host ">> 自动触发：仅构建（不发 Release）"
