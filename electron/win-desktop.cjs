@@ -1,47 +1,73 @@
 'use strict';
 
-// Windows 桌面层：尽量把窗口挂到 WorkerW（桌面图标层之下、壁纸层）。
-// 用系统自带 PowerShell + C# P/Invoke，运行时编译，无需随包分发原生二进制。
-// 多种查找路径；找不到时降级（不报错），保持全屏+鼠标穿透。
+// Windows 桌面层：把窗口挂到 WorkerW/Progman（桌面图标层之下、壁纸层）。
+// 枚举顶层窗口定位，比单纯 FindWindow 更稳；诊断日志写 %TEMP%\yutang-desktop.log。
 
 const { spawnSync } = require('node:child_process');
 
 function buildPowerShell(hwnd, enabled) {
   return `$ErrorActionPreference = 'Continue'
+$log = Join-Path $env:TEMP 'yutang-desktop.log'
+function Log($s) { try { "$([DateTime]::Now.ToString('o')) $s" | Out-File -Append -FilePath $log -Encoding utf8 } catch {} }
 Add-Type @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class WinDesktopApi {
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+  public static extern IntPtr FindWindow(string c, string w);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
+  public static extern IntPtr FindWindowEx(IntPtr p, IntPtr c, string c, string w);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetClassName(IntPtr h, StringBuilder s, int max);
   [DllImport("user32.dll")]
-  public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+  public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint f, uint t, out IntPtr r);
   [DllImport("user32.dll")]
-  public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
   [DllImport("user32.dll")]
-  public static extern bool SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+  public static extern bool SetParent(IntPtr c, IntPtr p);
+  [DllImport("user32.dll")]
+  public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 }
 '@
 $child = [IntPtr][int64]'${hwnd}'
+Log "start enabled=${enabled ? 'attach' : 'detach'} child=$child"
 if ('detach' -eq '${enabled ? 'attach' : 'detach'}') {
   [void][WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
+  Log "detached"
   exit 0
 }
 $progman = [WinDesktopApi]::FindWindow('Progman', $null)
+Log "FindWindow Progman=$progman"
+$script:tops = New-Object System.Collections.ArrayList
+$enumCb = [WinDesktopApi+EnumWindowsProc]{
+  param($h, $l)
+  $sb = New-Object Text.StringBuilder 256
+  [void][WinDesktopApi]::GetClassName($h, $sb, 256)
+  [void]$script:tops.Add("$h|$($sb.ToString())")
+  return $true
+}
+[void][WinDesktopApi]::EnumWindows($enumCb, [IntPtr]::Zero)
+Log "top windows count=$($script:tops.Count)"
+foreach ($t in $script:tops) {
+  if ($t -match 'Progman|WorkerW|Shell|DefView') { Log "  match: $t" }
+}
+if ($progman -eq [IntPtr]::Zero) {
+  foreach ($t in $script:tops) {
+    if ($t -match '^[^|]+\|Progman$') { $progman = [IntPtr]($t.Split('|')[0]); Log "enum found Progman=$progman" }
+  }
+}
 if ($progman -ne [IntPtr]::Zero) {
   $res = [IntPtr]::Zero
-  [void][WinDesktopApi]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 1000, [ref]$res)
-  Start-Sleep -Milliseconds 400
+  [void][WinDesktopApi]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::One, 0x0002, 1000, [ref]$res)
+  Start-Sleep -Milliseconds 500
 }
-# 方式1：直接找 WorkerW 顶层窗口
 $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, [IntPtr]::Zero, 'WorkerW', [IntPtr]::Zero)
-# 方式2：通过 SHELLDLL_DefView 找其后的 WorkerW
+Log "direct WorkerW=$parent"
 if ($parent -eq [IntPtr]::Zero) {
   $script:found = [IntPtr]::Zero
-  $cb = [WinDesktopApi+EnumWindowsProc]{
+  $cb2 = [WinDesktopApi+EnumWindowsProc]{
     param($h, $l)
     $defView = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
     if ($defView -ne [IntPtr]::Zero) {
@@ -49,15 +75,17 @@ if ($parent -eq [IntPtr]::Zero) {
     }
     return $true
   }
-  [void][WinDesktopApi]::EnumWindows($cb, [IntPtr]::Zero)
+  [void][WinDesktopApi]::EnumWindows($cb2, [IntPtr]::Zero)
   if ($script:found -ne [IntPtr]::Zero) { $parent = $script:found }
 }
-# 方式3：回退直接挂 Progman
 if ($parent -eq [IntPtr]::Zero -and $progman -ne [IntPtr]::Zero) { $parent = $progman }
+Log "chosen parent=$parent"
 if ($parent -ne [IntPtr]::Zero) {
   [void][WinDesktopApi]::SetParent($child, $parent)
+  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0,0,0,0, 0x0001 -bor 0x0004 -bor 0x0010)
+  Log "SetParent ok"
 } else {
-  Write-Output 'fallback'
+  Log "fallback: no desktop layer"
 }
 exit 0
 `;
@@ -74,7 +102,6 @@ function setDesktopLevel(handle, enabled) {
     { windowsHide: true, timeout: 20000 }
   );
   if (result.error) throw result.error;
-  // 脚本找不到桌面层时输出 fallback 并以 0 退出，不再视为错误
   if (result.status !== 0) {
     const detail = (result.stderr || '').toString().trim() || `PowerShell exited ${result.status}`;
     throw new Error(detail);
