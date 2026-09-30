@@ -62,7 +62,7 @@ Log "progman=$($script:progman) defOwner=$($script:defOwner)"
 
 if ($script:progman -ne [IntPtr]::Zero) {
   $res = [IntPtr]::Zero
-  [void][WinDesktopApi]::SendMessageTimeout($script:progman, 0x052C, [IntPtr]::Zero, [IntPtr]::One, 0x0002, 1000, [ref]$res)
+  [void][WinDesktopApi]::SendMessageTimeout($script:progman, 0x052C, [IntPtr]::Zero, [IntPtr]::new(1), 0x0002, 1000, [ref]$res)
   Start-Sleep -Milliseconds 500
 }
 
