@@ -33,6 +33,7 @@ if ('${enabled ? 'attach' : 'detach'}' -eq 'detach') {
 $progman = [WinDesktopApi]::FindWindow('Progman', $null)
 $res = [IntPtr]::Zero
 [void][WinDesktopApi]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 1000, [ref]$res)
+Start-Sleep -Milliseconds 400
 $wallpaperWorker = [IntPtr]::Zero
 $callback = [WinDesktopApi+EnumWindowsProc]{
   param($hWnd, $lParam)
@@ -43,8 +44,11 @@ $callback = [WinDesktopApi+EnumWindowsProc]{
   return $true
 }
 [void][WinDesktopApi]::EnumWindows($callback, [IntPtr]::Zero)
-if ($wallpaperWorker -eq [IntPtr]::Zero) { Write-Error 'WorkerW not found'; exit 1 }
-[void][WinDesktopApi]::SetParent($child, $wallpaperWorker)
+# 现代 Win11 常找不到独立 WorkerW，回退直接挂 Progman，同样位于图标下层
+$parent = $wallpaperWorker
+if ($parent -eq [IntPtr]::Zero) { $parent = $progman }
+if ($parent -eq [IntPtr]::Zero) { Write-Error 'desktop layer not found'; exit 1 }
+[void][WinDesktopApi]::SetParent($child, $parent)
 exit 0
 `;
 }
