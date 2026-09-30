@@ -55,7 +55,7 @@ jobs:
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.release }}" -eq "true") {
             Write-Host ">> 手动触发：构建并发布 GitHub Release"
-            npx electron-builder --win nsis --x64
+            npx electron-builder --win nsis --x64 --publish always
           } else {
             Write-Host ">> 自动触发：仅构建（不发 Release）"
             npx electron-builder --win nsis --x64 --publish never
