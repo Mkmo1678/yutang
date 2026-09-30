@@ -98,11 +98,10 @@ function applyDesktopMode(enabled) {
     pondWindow.setFocusable(false);
     pondWindow.blur();
     pondWindow.showInactive();
-    try { nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), true); }
-    catch (error) { placementError = `桌面层切换失败：${error.message}`; }
+    nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), true);
     if (isMac) app.dock.hide();
   } else {
-    try { nativeWindow?.setDesktopLevel(pondWindow.getNativeWindowHandle(), false); } catch { /* Detach best effort. */ }
+    nativeWindow?.setDesktopLevel(pondWindow.getNativeWindowHandle(), false);
     if (isMac) {
       pondWindow.setVisibleOnAllWorkspaces(false);
       pondWindow.setHiddenInMissionControl(false);

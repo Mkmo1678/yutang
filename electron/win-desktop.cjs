@@ -3,7 +3,7 @@
 // Windows 桌面层：把窗口挂到 WorkerW/Progman（桌面图标层之下、壁纸层）。
 // OpenInputDesktop 切到交互桌面；枚举定位 Progman/WorkerW；句柄用 int64 解析。
 
-const { spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 
 function buildPowerShell(hwnd, enabled) {
   return `$log = Join-Path $env:TEMP 'yutang-desktop.log'
@@ -89,23 +89,28 @@ exit 0
 `;
 }
 
+// 异步 spawn：主进程不阻塞，否则 SetParent 给 Electron 窗口发同步消息会死锁。
 function setDesktopLevel(handle, enabled) {
-  if (!handle || !Buffer.isBuffer(handle)) throw new Error('Invalid window handle.');
-  const hwnd = handle.readBigUInt64LE(0).toString();
-  const script = buildPowerShell(hwnd, !!enabled);
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  const psExe = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
-  const result = spawnSync(
-    psExe,
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-    { windowsHide: true, timeout: 30000 }
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const detail = (result.stderr || '').toString().trim() || `PowerShell exited ${result.status}`;
-    throw new Error(detail);
-  }
-  return true;
+  return new Promise((resolve) => {
+    if (!handle || !Buffer.isBuffer(handle)) return resolve();
+    const hwnd = handle.readBigUInt64LE(0).toString();
+    const script = buildPowerShell(hwnd, !!enabled);
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const psExe = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+    try {
+      const child = spawn(
+        psExe,
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+        { windowsHide: true, detached: false }
+      );
+      child.on('error', () => resolve());
+      child.on('close', () => resolve());
+      // 不等待输出，立即返回；SetParent 在脚本里同步完成
+      setTimeout(() => resolve(), 15000).unref?.();
+    } catch {
+      resolve();
+    }
+  });
 }
 
 module.exports = { setDesktopLevel };
