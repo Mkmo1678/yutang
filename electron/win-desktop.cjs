@@ -1,14 +1,14 @@
 'use strict';
 
 // Windows 桌面层：把窗口挂到 WorkerW/Progman（桌面图标层之下、壁纸层）。
-// 枚举顶层窗口定位，比单纯 FindWindow 更稳；诊断日志写 %TEMP%\yutang-desktop.log。
+// 关键：spawn 出的 PowerShell 线程可能不在交互桌面，先 OpenInputDesktop/SetThreadDesktop 切到输入桌面。
 
 const { spawnSync } = require('node:child_process');
 
 function buildPowerShell(hwnd, enabled) {
-  return `$ErrorActionPreference = 'Continue'
-$log = Join-Path $env:TEMP 'yutang-desktop.log'
+  return `$log = Join-Path $env:TEMP 'yutang-desktop.log'
 function Log($s) { try { "$([DateTime]::Now.ToString('o')) $s" | Out-File -Append -FilePath $log -Encoding utf8 } catch {} }
+try {
 Add-Type @'
 using System;
 using System.Text;
@@ -18,7 +18,7 @@ public class WinDesktopApi {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern IntPtr FindWindow(string c, string w);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindowEx(IntPtr p, IntPtr c, string c, string w);
+  public static extern IntPtr FindWindowEx(IntPtr p, IntPtr c, string w);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetClassName(IntPtr h, StringBuilder s, int max);
   [DllImport("user32.dll")]
@@ -28,34 +28,37 @@ public class WinDesktopApi {
   [DllImport("user32.dll")]
   public static extern bool SetParent(IntPtr c, IntPtr p);
   [DllImport("user32.dll")]
-  public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+  [DllImport("user32.dll")]
+  public static extern bool SetThreadDesktop(IntPtr h);
 }
 '@
 $child = [IntPtr][int64]'${hwnd}'
-Log "start enabled=${enabled ? 'attach' : 'detach'} child=$child"
+Log "start ${enabled ? 'attach' : 'detach'} child=$child"
 if ('detach' -eq '${enabled ? 'attach' : 'detach'}') {
   [void][WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
   Log "detached"
   exit 0
 }
+$hDesk = [WinDesktopApi]::OpenInputDesktop(0, $false, 0x01FF)
+Log "OpenInputDesktop=$hDesk"
+if ($hDesk -ne [IntPtr]::Zero) { [void][WinDesktopApi]::SetThreadDesktop($hDesk) }
 $progman = [WinDesktopApi]::FindWindow('Progman', $null)
 Log "FindWindow Progman=$progman"
 $script:tops = New-Object System.Collections.ArrayList
-$enumCb = [WinDesktopApi+EnumWindowsProc]{
+$cb1 = [WinDesktopApi+EnumWindowsProc]{
   param($h, $l)
-  $sb = New-Object Text.StringBuilder 256
+  $sb = New-Object System.Text.StringBuilder 256
   [void][WinDesktopApi]::GetClassName($h, $sb, 256)
   [void]$script:tops.Add("$h|$($sb.ToString())")
   return $true
 }
-[void][WinDesktopApi]::EnumWindows($enumCb, [IntPtr]::Zero)
-Log "top windows count=$($script:tops.Count)"
-foreach ($t in $script:tops) {
-  if ($t -match 'Progman|WorkerW|Shell|DefView') { Log "  match: $t" }
-}
+[void][WinDesktopApi]::EnumWindows($cb1, [IntPtr]::Zero)
+Log "top count=$($script:tops.Count)"
+foreach ($t in $script:tops) { if ($t -match 'Progman|WorkerW|Shell|DefView') { Log "  $t" } }
 if ($progman -eq [IntPtr]::Zero) {
   foreach ($t in $script:tops) {
-    if ($t -match '^[^|]+\|Progman$') { $progman = [IntPtr]($t.Split('|')[0]); Log "enum found Progman=$progman" }
+    if ($t -match '^[^|]+\|Progman$') { $progman = [IntPtr]($t.Split('|')[0]); Log "enum Progman=$progman" }
   }
 }
 if ($progman -ne [IntPtr]::Zero) {
@@ -69,10 +72,8 @@ if ($parent -eq [IntPtr]::Zero) {
   $script:found = [IntPtr]::Zero
   $cb2 = [WinDesktopApi+EnumWindowsProc]{
     param($h, $l)
-    $defView = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
-    if ($defView -ne [IntPtr]::Zero) {
-      $script:found = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $h, 'WorkerW', [IntPtr]::Zero)
-    }
+    $dv = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+    if ($dv -ne [IntPtr]::Zero) { $script:found = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $h, 'WorkerW', [IntPtr]::Zero) }
     return $true
   }
   [void][WinDesktopApi]::EnumWindows($cb2, [IntPtr]::Zero)
@@ -82,10 +83,12 @@ if ($parent -eq [IntPtr]::Zero -and $progman -ne [IntPtr]::Zero) { $parent = $pr
 Log "chosen parent=$parent"
 if ($parent -ne [IntPtr]::Zero) {
   [void][WinDesktopApi]::SetParent($child, $parent)
-  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0,0,0,0, 0x0001 -bor 0x0004 -bor 0x0010)
   Log "SetParent ok"
 } else {
-  Log "fallback: no desktop layer"
+  Log "fallback"
+}
+} catch {
+  Log "ERROR: $($_.Exception.Message)"
 }
 exit 0
 `;
@@ -96,8 +99,9 @@ function setDesktopLevel(handle, enabled) {
   const hwnd = handle.readBigUInt64LE(0).toString();
   const script = buildPowerShell(hwnd, !!enabled);
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const psExe = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
   const result = spawnSync(
-    'powershell.exe',
+    psExe,
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
     { windowsHide: true, timeout: 20000 }
   );
