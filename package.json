@@ -1,6 +1,6 @@
 {
   "name": "fusheng-koi-pond",
-  "version": "3.0.10",
+  "version": "3.0.11",
   "private": true,
   "type": "module",
   "description": "浮生 · 摸鱼桌面，锦鲤、赶海与猫咪庭院",
@@ -103,7 +103,7 @@
     }
   },
   "author": {
-    "name": "赛博老爸",
-    "email": "cyberdaddy@163.com"
+    "name": "默默burry",
+    "url": "https://github.com/Mkmo1678"
   }
 }
