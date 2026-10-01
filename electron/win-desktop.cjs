@@ -57,7 +57,7 @@ Log "start mode=$mode child=$child isValid=$([WinDesktopApi]::IsWindow($child))"
 
 # ---- detach 模式 ----
 if ($mode -eq 'detach') {
-  [void][WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
+  $oldP = [WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
   # v2.5.3: 恢复 Electron 原始 layered 样式（attach 时去掉的 0x00080000 按位加回，
   # 保留 NOACTIVATE/WINDOWEDGE/TRANSPARENT 等其他样式）并强制重绘，
   # 避免 detach 后窗口样式与 Chromium 绘制路径不一致导致黑屏/不可见
@@ -66,7 +66,12 @@ if ($mode -eq 'detach') {
   [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
   [void][WinDesktopApi]::UpdateWindow($child)
   [void][WinDesktopApi]::ShowWindow($child, 5)
-  Log "detached ok"
+  # v3.0.2: 回到普通窗口后强制提到顶层（SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE），
+  # 确保 detach 后窗口一定显示在最前面，不再“只剩托盘图标”
+  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010)
+  Start-Sleep -Milliseconds 200
+  $visD = [WinDesktopApi]::IsWindowVisible($child)
+  Log "detached ok oldParent=$oldP visible=$visD"
   exit 0
 }
 
@@ -166,9 +171,12 @@ Add-Type -AssemblyName System.Windows.Forms
 $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 Log("screen bounds: $($b.Width)x$($b.Height) at $($b.X),$($b.Y)")
 
-# SetWindowPos: SWP_NOACTIVATE(0x0010) | SWP_ASYNCWINDOWPOS(0x4000) | SWP_SHOWWINDOW(0x0040)
-[void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
-Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height)"
+# SetWindowPos: v3.0.2 统一压 HWND_BOTTOM(1)——无论挂 WorkerW 还是 Progman，
+# 摸鱼窗口都在最底层，桌面图标/其他窗口永远显示在窗口之上。
+# （此前挂 Progman 时用 HWND_TOP 全屏窗口直接盖住桌面图标 = “图标不出来”）
+# flags: SWP_NOACTIVATE(0x0010) | SWP_ASYNCWINDOWPOS(0x4000) | SWP_SHOWWINDOW(0x0040)
+[void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height) bottom=true"
 
 # 确保窗口可见且不被激活
 [void][WinDesktopApi]::ShowWindow($child, 5)  # SW_SHOW

@@ -198,6 +198,12 @@ function changeFullScreen(enabled) {
 }
 function setDesktopMode(enabled) {
   requireBoolean(enabled);
+  // v3.0.2: 留痕 detach 触发源（IPC 来自渲染进程/托盘菜单/内部逻辑都能从调用栈区分）
+  try {
+    const frames = new Error().stack?.split('\n') || [];
+    const caller = frames.slice(2, 4).map((f) => f.trim()).join(' < ');
+    logToFile('desktop', `setDesktopMode(${enabled}) via ${caller}`);
+  } catch {}
   return transitionWindow(async () => {
     if (enabled) await changeFullScreen(false);
     return applyDesktopMode(enabled);
@@ -220,6 +226,7 @@ function hideWindow() {
 
 function showControls() {
   if (!pondWindow || pondWindow.isDestroyed()) createWindow();
+  try { logToFile('desktop', `showControls (tray/快捷键/second-instance/activate)`); } catch {}
   applyDesktopMode(false);
   if (pondWindow.isMinimized()) pondWindow.restore();
   pondWindow.show();
@@ -322,7 +329,7 @@ function updateTray() {
     { label: '浮生锦鲤池', enabled: false },
     { type: 'separator' },
     { label: '打开风景控制台', accelerator: SHORTCUT, click: showControls },
-    { label: '融入桌面', type: 'checkbox', checked: state.desktopMode, enabled: state.desktopSupported, click: (item) => setDesktopMode(item.checked) },
+    { label: '融入桌面', type: 'checkbox', checked: state.desktopMode, enabled: state.desktopSupported, click: (item) => { try { logToFile('desktop', `tray click 融入桌面 -> ${item.checked}`); } catch {} setDesktopMode(item.checked); } },
     { label: '隐藏风景窗口', click: hideWindow },
     { label: '主题快捷互动', accelerator: FEED_SHORTCUT, click: () => feed('tray') },
     { type: 'separator' },
