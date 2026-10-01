@@ -1,6 +1,11 @@
 'use strict';
 const { app, BrowserWindow, Menu, Tray, nativeImage, screen, globalShortcut, ipcMain, systemPreferences, powerMonitor } = require('electron');
 const path = require('node:path');
+
+// v2.5.3: 禁用 GPU 合成（保留 WebGL 渲染）。SetParent 到 WorkerW 桌面层后
+// Chromium 的 DComp 合成与桌面合成器冲突，是窗口消失/黑屏/崩溃的高发根因；
+// 关闭 GPU 合成走软件合成，可根治此面，动画性能影响较小。
+app.commandLine.appendSwitch('disable-gpu-compositing');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
@@ -26,6 +31,10 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('exit', (code) => {
   logToFile('exit', `code=${code}`);
+});
+// v2.5.3: GPU/渲染/utility 子进程崩溃必须留痕（v2.5.2 无此日志，GPU 崩溃时日志一片空白）
+app.on('child-process-gone', (_event, details) => {
+  logToFile('child-gone', `type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
 });
 
 app.setName('浮生锦鲤池');
@@ -120,9 +129,21 @@ function applyDesktopMode(enabled) {
     pondWindow.setFocusable(false);
     pondWindow.blur();
     pondWindow.showInactive();
+    // v2.5.3: 记录 attach 触发源，日志可直接区分 detach 是谁发起的
+    logToFile('desktop', `setDesktopLevel(true) from=applyDesktopMode hwnd=${pondWindow.getNativeWindowHandle()?.readBigUInt64LE?.(0)?.toString?.() || ''}`);
     nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), true);
+    // v2.5.3: attach 后自检窗口存活与可见性（3s/6s），异常直接写日志
+    setTimeout(() => {
+      if (!pondWindow || pondWindow.isDestroyed()) { logToFile('desktop', 'post-attach 3s: window destroyed'); return; }
+      logToFile('desktop', `post-attach 3s: visible=${pondWindow.isVisible()} bounds=${JSON.stringify(pondWindow.getBounds())} desktopMode=${state.desktopMode}`);
+    }, 3000);
+    setTimeout(() => {
+      if (!pondWindow || pondWindow.isDestroyed()) { logToFile('desktop', 'post-attach 6s: window destroyed'); return; }
+      logToFile('desktop', `post-attach 6s: visible=${pondWindow.isVisible()} bounds=${JSON.stringify(pondWindow.getBounds())} desktopMode=${state.desktopMode}`);
+    }, 6000);
     if (isMac) app.dock.hide();
   } else {
+    logToFile('desktop', `setDesktopLevel(false) from=applyDesktopMode`);
     nativeWindow?.setDesktopLevel(pondWindow.getNativeWindowHandle(), false);
     if (isMac) {
       pondWindow.setVisibleOnAllWorkspaces(false);
@@ -392,10 +413,31 @@ function createWindow() {
     // inside it re-enters the same native close and can leave the app running.
     if (!quitting) { event.preventDefault(); setImmediate(() => app.quit()); }
   });
-  pondWindow.on('closed', () => { pondWindow = undefined; });
+  pondWindow.on('closed', () => {
+    // v2.5.3: 窗口销毁必须留痕。融入桌面时窗口被系统销毁（WorkerW 刷新/桌面重建等）
+    // 是"窗口突然消失、只剩托盘图标"的无痕元凶之一，这里记录并自动恢复。
+    const wasDesktop = state.desktopMode;
+    pondWindow = undefined;
+    logToFile('window', `closed wasDesktop=${wasDesktop} quitting=${quitting}`);
+    if (wasDesktop && !quitting) {
+      setTimeout(() => {
+        if (quitting || pondWindow) return;
+        try {
+          logToFile('window', 'auto-recover: recreate window');
+          state.desktopMode = false; // 窗口已销毁，重置状态让 applyDesktopMode(true) 真正执行 attach
+          createWindow();
+          if (state.desktopSupported) {
+            pondWindow.webContents.once('did-finish-load', () => applyDesktopMode(true));
+          }
+        } catch (err) { logToFile('window', `auto-recover failed: ${String(err)}`); }
+      }, 1500);
+    }
+  });
   pondWindow.on('leave-full-screen', () => {
     if (state.desktopMode) {
       pondWindow.setBounds(screen.getPrimaryDisplay().bounds, false);
+      // v2.5.3: 记录重挂触发源
+      logToFile('desktop', `setDesktopLevel(true) from=leave-full-screen`);
       nativeWindow?.setDesktopLevel(pondWindow.getNativeWindowHandle(), true);
     }
   });

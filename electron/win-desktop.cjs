@@ -42,6 +42,12 @@ public class WinDesktopApi {
   [DllImport("user32.dll")]
   public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")]
+  public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern bool InvalidateRect(IntPtr h, IntPtr r, bool erase);
+  [DllImport("user32.dll")]
+  public static extern bool UpdateWindow(IntPtr h);
+  [DllImport("user32.dll")]
   public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, IntPtr lpfnEnum, IntPtr dwData);
 }
 '@
@@ -52,8 +58,13 @@ Log "start mode=$mode child=$child isValid=$([WinDesktopApi]::IsWindow($child))"
 # ---- detach 模式 ----
 if ($mode -eq 'detach') {
   [void][WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
-  # 恢复普通窗口样式：加回 layered（Electron transparent 需要）
-  [void][WinDesktopApi]::SetWindowLong($child, -20, 0x00080000)
+  # v2.5.3: 恢复 Electron 原始 layered 样式（attach 时去掉的 0x00080000 按位加回，
+  # 保留 NOACTIVATE/WINDOWEDGE/TRANSPARENT 等其他样式）并强制重绘，
+  # 避免 detach 后窗口样式与 Chromium 绘制路径不一致导致黑屏/不可见
+  $curEx = [WinDesktopApi]::GetWindowLong($child, -20)
+  [void][WinDesktopApi]::SetWindowLong($child, -20, $curEx -bor 0x00080000)
+  [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
+  [void][WinDesktopApi]::UpdateWindow($child)
   [void][WinDesktopApi]::ShowWindow($child, 5)
   Log "detached ok"
   exit 0
@@ -149,6 +160,10 @@ Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height)"
 
 # 确保窗口可见且不被激活
 [void][WinDesktopApi]::ShowWindow($child, 5)  # SW_SHOW
+# v2.5.3: 去 layered 后 Chromium 可能不主动重绘窗口表面，强制重绘让画面立刻出现
+[void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
+[void][WinDesktopApi]::UpdateWindow($child)
+Log "invalidate+update done, visible=$([WinDesktopApi]::IsWindowVisible($child))"
 Log "attach complete"
 } catch {
   Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
