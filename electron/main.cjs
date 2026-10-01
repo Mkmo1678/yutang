@@ -132,6 +132,26 @@ function applyDesktopMode(enabled) {
     // v2.5.3: 记录 attach 触发源，日志可直接区分 detach 是谁发起的
     logToFile('desktop', `setDesktopLevel(true) from=applyDesktopMode hwnd=${pondWindow.getNativeWindowHandle()?.readBigUInt64LE?.(0)?.toString?.() || ''}`);
     nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), true);
+    // v3.0.3: 软件渲染在 SetParent 后可能只刷一帧，1s/3s/5s 强制重绘保持画面
+    [1000, 3000, 5000].forEach((ms) => setTimeout(() => {
+      try { if (!pondWindow || pondWindow.isDestroyed() || !state.desktopMode) return; nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), 'repaint'); } catch {}
+    }, ms));
+    // v3.0.3: attach 后 4s 截图验证渲染，保存 %TEMP%\yutang-attach-shot.png
+    setTimeout(() => {
+      try {
+        if (!pondWindow || pondWindow.isDestroyed() || !state.desktopMode) return;
+        pondWindow.webContents.capturePage().then((img) => {
+          try {
+            if (img && !img.isEmpty()) {
+              const shot = path.join(app.getPath('temp'), 'yutang-attach-shot.png');
+              fs.writeFileSync(shot, img.toPNG());
+              const size = img.getSize();
+              logToFile('desktop', `attach shot saved ${size.width}x${size.height} -> ${shot}`);
+            } else logToFile('desktop', 'attach shot empty');
+          } catch (err) { logToFile('desktop', `attach shot write failed ${String(err)}`); }
+        }).catch((e) => logToFile('desktop', `attach shot failed ${String(e)}`));
+      } catch {}
+    }, 4000);
     // v2.5.3: attach 后自检窗口存活与可见性（3s/6s），异常直接写日志
     setTimeout(() => {
       if (!pondWindow || pondWindow.isDestroyed()) { logToFile('desktop', 'post-attach 3s: window destroyed'); return; }

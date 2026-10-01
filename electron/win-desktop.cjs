@@ -5,7 +5,7 @@
 
 const { spawn } = require('node:child_process');
 
-function buildPowerShell(hwnd, enabled) {
+function buildPowerShell(hwnd, mode) {
   return `$log = Join-Path $env:TEMP 'yutang-desktop.log'
 function Log($s) { try { "$([DateTime]::Now.ToString('o')) $s" | Out-File -Append -FilePath $log -Encoding utf8 } catch {} }
 try {
@@ -44,6 +44,8 @@ public class WinDesktopApi {
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")]
+  public static extern IntPtr GetWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")]
   public static extern bool InvalidateRect(IntPtr h, IntPtr r, bool erase);
   [DllImport("user32.dll")]
   public static extern bool UpdateWindow(IntPtr h);
@@ -52,8 +54,17 @@ public class WinDesktopApi {
 }
 '@
 $child = [IntPtr][int64]'${hwnd}'
-$mode = '${enabled ? 'attach' : 'detach'}'
+$mode = '${mode}'
 Log "start mode=$mode child=$child isValid=$([WinDesktopApi]::IsWindow($child))"
+
+# ---- repaint 模式：不改变父窗口/样式，只强制重绘（软件渲染在 SetParent 后可能只刷一帧）----
+if ($mode -eq 'repaint') {
+  [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
+  [void][WinDesktopApi]::UpdateWindow($child)
+  [void][WinDesktopApi]::ShowWindow($child, 5)
+  Log "repaint done"
+  exit 0
+}
 
 # ---- detach 模式 ----
 if ($mode -eq 'detach') {
@@ -171,12 +182,18 @@ Add-Type -AssemblyName System.Windows.Forms
 $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 Log("screen bounds: $($b.Width)x$($b.Height) at $($b.X),$($b.Y)")
 
-# SetWindowPos: v3.0.2 统一压 HWND_BOTTOM(1)——无论挂 WorkerW 还是 Progman，
-# 摸鱼窗口都在最底层，桌面图标/其他窗口永远显示在窗口之上。
-# （此前挂 Progman 时用 HWND_TOP 全屏窗口直接盖住桌面图标 = “图标不出来”）
+# SetWindowPos: v3.0.3 优先把窗口插到 Progman 的 DefView（图标层）之后，
+# 图标永远显示在窗口之上；找不到 DefView 才压 HWND_BOTTOM(1)。
+# （此前挂 Progman 用 HWND_TOP 盖住图标、用 HWND_BOTTOM 在个别系统仍被 Explorer 重排）
 # flags: SWP_NOACTIVATE(0x0010) | SWP_ASYNCWINDOWPOS(0x4000) | SWP_SHOWWINDOW(0x0040)
-[void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
-Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height) bottom=true"
+$defView = [WinDesktopApi]::FindWindowEx($script:progman, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+if ($defView -ne [IntPtr]::Zero) {
+  [void][WinDesktopApi]::SetWindowPos($child, $defView, 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+  Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height) afterDefView=$defView"
+} else {
+  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+  Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height) bottom=true (no defView)"
+}
 
 # 确保窗口可见且不被激活
 [void][WinDesktopApi]::ShowWindow($child, 5)  # SW_SHOW
@@ -190,13 +207,35 @@ Log "invalidate+update done, visible=$vis1 parent=$parent"
 if (-not $vis1 -and $script:progman -ne [IntPtr]::Zero -and [WinDesktopApi]::IsWindowVisible($script:progman)) {
   Log "visible check failed -> retry attach to progman=$($script:progman)"
   [void][WinDesktopApi]::SetParent($child, $script:progman)
-  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+  $defView2 = [WinDesktopApi]::FindWindowEx($script:progman, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+  if ($defView2 -ne [IntPtr]::Zero) {
+    [void][WinDesktopApi]::SetWindowPos($child, $defView2, 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+    Log "retry SetWindowPos afterDefView=$defView2"
+  } else {
+    [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+  }
   [void][WinDesktopApi]::ShowWindow($child, 5)
   [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
   [void][WinDesktopApi]::UpdateWindow($child)
   Log "retry progman done, visible=$([WinDesktopApi]::IsWindowVisible($child))"
 }
-Log "attach complete"
+# v3.0.3: 验证真实 Z 序——Progman 子窗口从上到下逐个记录，
+# 确认 [DefView-ICONS] 在 [OUR-WINDOW] 之前（图标在摸鱼窗口之上）
+function Get-ZChildren($root) {
+  $parts = New-Object System.Collections.Generic.List[string]
+  $h = [WinDesktopApi]::GetWindow($root, 5)  # GW_CHILD
+  while ($h -ne [IntPtr]::Zero) {
+    $sb = New-Object System.Text.StringBuilder 256
+    [void][WinDesktopApi]::GetClassName($h, $sb, 256)
+    $kind = ''
+    if ($h -eq $child) { $kind = '[OUR-WINDOW]' }
+    elseif ($sb.ToString() -eq 'SHELLDLL_DefView') { $kind = '[DefView-ICONS]' }
+    [void]$parts.Add("$h:$($sb.ToString())$kind")
+    $h = [WinDesktopApi]::GetWindow($h, 2)  # GW_HWNDNEXT
+  }
+  return ($parts -join ' > ')
+}
+Log "attach complete. progman children z-order: $(Get-ZChildren $script:progman)"
 } catch {
   Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
 }
@@ -209,7 +248,8 @@ function setDesktopLevel(handle, enabled) {
   return new Promise((resolve) => {
     if (!handle || !Buffer.isBuffer(handle)) return resolve();
     const hwnd = handle.readBigUInt64LE(0).toString();
-    const script = buildPowerShell(hwnd, !!enabled);
+    const mode = enabled === 'repaint' ? 'repaint' : (!!enabled ? 'attach' : 'detach');
+    const script = buildPowerShell(hwnd, mode);
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const psExe = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
     try {
