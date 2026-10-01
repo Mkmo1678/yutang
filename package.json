@@ -1,6 +1,6 @@
 {
   "name": "fusheng-koi-pond",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "private": true,
   "type": "module",
   "description": "浮生 · 摸鱼桌面，锦鲤、赶海与猫咪庭院",
@@ -54,9 +54,7 @@
     },
     "files": [
       "dist/**/*",
-      "electron/main.cjs",
-      "electron/preload.cjs",
-      "electron/policy.cjs",
+      "electron/*.cjs",
       "package.json"
     ],
     "mac": {
