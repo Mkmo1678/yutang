@@ -6,6 +6,28 @@ const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 const { allowedEntry, requireBoolean, pointForBounds, parseHelperLine, displayMetrics } = require('./policy.cjs');
 
+// ---- 文件日志：所有错误和启动信息写到 %TEMP%\yutang-main.log ----
+const LOG_PATH = path.join(process.env.TEMP || process.env.TMP || '/tmp', 'yutang-main.log');
+function logToFile(tag, msg) {
+  try {
+    const line = `${new Date().toISOString()} [${tag}] ${msg}\n`;
+    fs.appendFileSync(LOG_PATH, line);
+  } catch {}
+}
+logToFile('boot', '=== yutang main starting ===');
+logToFile('boot', `version=${app.getVersion()} platform=${process.platform} packaged=${app.isPackaged}`);
+
+// 进程级崩溃保护：未捕获异常不能让 app 直接退出
+process.on('uncaughtException', (err) => {
+  logToFile('uncaughtException', (err && err.stack) ? err.stack : String(err));
+});
+process.on('unhandledRejection', (reason) => {
+  logToFile('unhandledRejection', (reason && reason.stack) ? reason.stack : String(reason));
+});
+process.on('exit', (code) => {
+  logToFile('exit', `code=${code}`);
+});
+
 app.setName('浮生锦鲤池');
 const SHORTCUT = 'CommandOrControl+Shift+K';
 const FEED_SHORTCUT = 'CommandOrControl+Shift+F';
@@ -325,7 +347,8 @@ function createWindow() {
     width: Math.min(1380, workArea.width - 60), height: Math.min(900, workArea.height - 70),
     minWidth: WINDOW_MIN[0], minHeight: WINDOW_MIN[1], show: false,
     frame: isWin ? false : true,
-    transparent: isWin,
+    // Windows 下不用 transparent：SetParent 到 WorkerW 后 layered 窗口会导致 DWM 崩溃
+    transparent: false,
     resizable: true, movable: true, fullscreenable: true, minimizable: true, closable: true,
     ...(isMac ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } } : {}),
     title: '浮生 · 摸鱼桌面', backgroundColor: '#1d302e',
@@ -340,7 +363,27 @@ function createWindow() {
   pondWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
   pondWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   pondWindow.webContents.session.setPermissionCheckHandler(() => false);
-  pondWindow.webContents.on('did-finish-load', publish);
+  pondWindow.webContents.on('did-finish-load', () => { logToFile('renderer', 'did-finish-load'); publish(); });
+  pondWindow.webContents.on('did-fail-load', (e, errorCode, errorDescription) => {
+    logToFile('renderer', `did-fail-load code=${errorCode} desc=${errorDescription}`);
+  });
+  // 渲染进程崩溃不退出 app，自动 reload
+  pondWindow.webContents.on('render-process-gone', (e, details) => {
+    logToFile('renderer', `render-process-gone: ${JSON.stringify(details)}`);
+    if (!pondWindow || pondWindow.isDestroyed()) return;
+    setTimeout(() => {
+      try { if (!pondWindow.isDestroyed()) pondWindow.reload(); } catch {}
+    }, 1000);
+  });
+  pondWindow.webContents.on('unresponsive', () => {
+    logToFile('renderer', 'unresponsive');
+  });
+  pondWindow.webContents.on('responsive', () => {
+    logToFile('renderer', 'responsive');
+  });
+  pondWindow.webContents.on('console-message', (e, level, message) => {
+    if (level >= 2) logToFile('renderer-console', `L${level}: ${message}`);
+  });
   pondWindow.on('moved', publish);
   for (const event of ['enter-full-screen', 'leave-full-screen', 'show', 'hide', 'minimize', 'restore']) pondWindow.on(event, publish);
   pondWindow.once('ready-to-show', () => pondWindow.show());

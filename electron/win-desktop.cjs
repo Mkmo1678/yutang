@@ -1,7 +1,7 @@
 'use strict';
 
 // Windows 桌面层：把窗口挂到 WorkerW/Progman（桌面图标层之下、壁纸层）。
-// OpenInputDesktop 切到交互桌面；枚举定位 Progman/WorkerW；句柄用 int64 解析。
+// 完整 Win32 API 声明；SetParent 后去掉 layered 样式避免 DWM 崩溃；全量日志。
 
 const { spawn } = require('node:child_process');
 
@@ -26,20 +26,40 @@ public class WinDesktopApi {
   [DllImport("user32.dll")]
   public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
   [DllImport("user32.dll")]
-  public static extern bool SetParent(IntPtr c, IntPtr p);
+  public static extern IntPtr SetParent(IntPtr c, IntPtr p);
+  [DllImport("user32.dll")]
+  public extern static bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")]
+  public static extern int GetWindowLong(IntPtr h, int idx);
+  [DllImport("user32.dll")]
+  public static extern int SetWindowLong(IntPtr h, int idx, int newLong);
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")]
   public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
   [DllImport("user32.dll")]
   public static extern bool SetThreadDesktop(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")]
+  public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, IntPtr lpfnEnum, IntPtr dwData);
 }
 '@
 $child = [IntPtr][int64]'${hwnd}'
-Log "start ${enabled ? 'attach' : 'detach'} child=$child"
-if ('detach' -eq '${enabled ? 'attach' : 'detach'}') {
+$mode = '${enabled ? 'attach' : 'detach'}'
+Log "start mode=$mode child=$child isValid=$([WinDesktopApi]::IsWindow($child))"
+
+# ---- detach 模式 ----
+if ($mode -eq 'detach') {
   [void][WinDesktopApi]::SetParent($child, [IntPtr]::Zero)
-  Log "detached"
+  # 恢复普通窗口样式：加回 layered（Electron transparent 需要）
+  [void][WinDesktopApi]::SetWindowLong($child, -20, 0x00080000)
+  [void][WinDesktopApi]::ShowWindow($child, 5)
+  Log "detached ok"
   exit 0
 }
+
+# ---- attach 模式 ----
 $hDesk = [WinDesktopApi]::OpenInputDesktop(0, $false, 0x01FF)
 Log "OpenInputDesktop=$hDesk"
 if ($hDesk -ne [IntPtr]::Zero) { [void][WinDesktopApi]::SetThreadDesktop($hDesk) }
@@ -60,34 +80,78 @@ $cb = [WinDesktopApi+EnumWindowsProc]{
   return $true
 }
 [void][WinDesktopApi]::EnumWindows($cb, [IntPtr]::Zero)
-Log "progman=$($script:progman) defOwner=$($script:defOwner) firstWorker=$($script:firstWorker)"
+Log "enum: progman=$($script:progman) defOwner=$($script:defOwner) firstWorker=$($script:firstWorker)"
 
+# 让 Progman 创建 WorkerW 壁纸层
 if ($script:progman -ne [IntPtr]::Zero) {
   $res = [IntPtr]::Zero
-  [void][WinDesktopApi]::SendMessageTimeout($script:progman, 0x052C, [IntPtr]::Zero, [IntPtr]::new(1), 0x0002, 1000, [ref]$res)
-  Start-Sleep -Milliseconds 500
+  [void][WinDesktopApi]::SendMessageTimeout($script:progman, 0x052C, [IntPtr]::Zero, [IntPtr]::new(1), 0x0002, 2000, [ref]$res)
+  Log "sent 0x052C to progman, res=$res"
+  Start-Sleep -Milliseconds 800
 }
 
-# 在 defOwner 之后找 WorkerW；回退到枚举到的第一个 WorkerW；不再回退 Progman（直接挂会卡死）
-$parent = [IntPtr]::Zero
-if ($script:defOwner -ne [IntPtr]::Zero) {
-  $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $script:defOwner, 'WorkerW', [IntPtr]::Zero)
+# 重新枚举一次（WorkerW 可能刚创建）
+$script:defOwner2 = [IntPtr]::Zero
+$script:workerAfterDef = [IntPtr]::Zero
+$cb2 = [WinDesktopApi+EnumWindowsProc]{
+  param($h, $l)
+  $sb = New-Object System.Text.StringBuilder 256
+  [void][WinDesktopApi]::GetClassName($h, $sb, 256)
+  $cn = $sb.ToString()
+  $dv = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+  if ($dv -ne [IntPtr]::Zero) { $script:defOwner2 = $h }
+  return $true
 }
-if ($parent -eq [IntPtr]::Zero) { $parent = $script:firstWorker }
+[void][WinDesktopApi]::EnumWindows($cb2, [IntPtr]::Zero)
+Log "re-enum: defOwner2=$($script:defOwner2)"
+
+# 找 SHELLDLL_DefView 后面的 WorkerW（正确的壁纸层位置）
+$parent = [IntPtr]::Zero
+if ($script:defOwner2 -ne [IntPtr] -and $script:defOwner2 -ne [IntPtr]::Zero) {
+  $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $script:defOwner2, 'WorkerW', [IntPtr]::Zero)
+  Log "FindWindowEx after defOwner2 -> $parent"
+}
+if ($parent -eq [IntPtr]::Zero -and $script:firstWorker -ne [IntPtr]::Zero) {
+  $parent = $script:firstWorker
+  Log "fallback to firstWorker=$parent"
+}
+if ($parent -eq [IntPtr]::Zero -and $script:progman -ne [IntPtr]::Zero) {
+  $parent = $script:progman
+  Log "final fallback to progman=$parent"
+}
 
 Log "chosen parent=$parent"
-if ($parent -ne [IntPtr]::Zero) {
-  [void][WinDesktopApi]::SetParent($child, $parent)
-  # 挂为子窗口后坐标系改变，立即重置为 0,0 全屏并显示
-  Add-Type -AssemblyName System.Windows.Forms
-  $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0, 0, $b.Width, $b.Height, 0x0040 -bor 0x0010 -bor 0x0004)
-  Log "SetParent ok, resized to $($b.Width)x$($b.Height)"
-} else {
-  Log "fallback no WorkerW"
+if ($parent -eq [IntPtr]::Zero) {
+  Log "ERROR: no parent window found"
+  exit 0
 }
+
+# 关键：先去掉 Electron transparent 窗口的 WS_EX_LAYERED，
+# 否则 SetParent 到 WorkerW 后 DWM 合成会崩溃
+$exStyle = [WinDesktopApi]::GetWindowLong($child, -20)  # GWL_EXSTYLE = -20
+Log "old exStyle=0x$('{0:X}' -f $exStyle)"
+$newExStyle = $exStyle -band (-bnot 0x00080000)  # 去掉 WS_EX_LAYERED
+[void][WinDesktopApi]::SetWindowLong($child, -20, $newExStyle)
+Log "new exStyle=0x$('{0:X}' -f $newExStyle)"
+
+# SetParent
+$oldParent = [WinDesktopApi]::SetParent($child, $parent)
+Log "SetParent done, oldParent=$oldParent"
+
+# 获取主屏尺寸
+Add-Type -AssemblyName System.Windows.Forms
+$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+Log("screen bounds: $($b.Width)x$($b.Height) at $($b.X),$($b.Y)")
+
+# SetWindowPos: SWP_NOACTIVATE(0x0010) | SWP_ASYNCWINDOWPOS(0x4000) | SWP_SHOWWINDOW(0x0040)
+[void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::Zero, 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height)"
+
+# 确保窗口可见且不被激活
+[void][WinDesktopApi]::ShowWindow($child, 5)  # SW_SHOW
+Log "attach complete"
 } catch {
-  Log "ERROR: $($_.Exception.Message)"
+  Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
 }
 exit 0
 `;
@@ -107,11 +171,19 @@ function setDesktopLevel(handle, enabled) {
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
         { windowsHide: true, detached: false }
       );
-      child.on('error', () => resolve());
-      child.on('close', () => resolve());
-      // 不等待输出，立即返回；SetParent 在脚本里同步完成
-      setTimeout(() => resolve(), 15000).unref?.();
-    } catch {
+      child.on('error', (e) => {
+        try {
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
+          fs.appendFileSync(logPath, `${new Date().toISOString()} spawn error: ${e.message}\n`);
+        } catch {}
+        resolve();
+      });
+      child.on('close', (code) => resolve());
+      // 30秒超时兜底
+      setTimeout(() => resolve(), 30000).unref?.();
+    } catch (e) {
       resolve();
     }
   });
