@@ -266,6 +266,40 @@ try {
 } catch {
   Log "screen shot failed: $($_.Exception.Message)"
 }
+# v3.0.7: watchdog——v3.0.6 证实 Chromium/系统会在挂载后约3秒撤销 SetParent
+# （repaint 时 GetParent=0、visible=False，用户看到“闪退”）。
+# 本脚本保持存活 20 秒，每 2 秒检查父窗口与可见性，被撤销就立刻重新挂载+重绘。
+$deadline = (Get-Date).AddSeconds(20)
+while ((Get-Date) -lt $deadline) {
+  Start-Sleep -Milliseconds 2000
+  $wP = [WinDesktopApi]::GetParent($child)
+  $wV = [WinDesktopApi]::IsWindowVisible($child)
+  $wEx = [WinDesktopApi]::GetWindowLong($child, -20)
+  $isLayered = ($wEx -band 0x00080000) -ne 0
+  # 只在“不可见 且 未恢复 layered（即仍是 attach 态）”时重新挂载：
+  # - Chromium/系统撤销：parent 被清 + 隐藏 + 仍是去 layered 态 -> 动作
+  # - 用户 detach：窗口恢复 layered + ShowWindow 可见 -> 不动作（避免反挂）
+  if (-not $wV -and -not $isLayered) {
+    Log "watchdog: parent=$wP visible=$wV layered=$isLayered -> re-attach"
+    [void][WinDesktopApi]::SetParent($child, $parent)
+    $dvW = [WinDesktopApi]::FindWindowEx($parent, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+    if ($dvW -ne [IntPtr]::Zero) {
+      $spW = [WinDesktopApi]::SetWindowPos($child, $dvW, 0, 0, $b.Width, $b.Height, $spFlags)
+      [void][WinDesktopApi]::SetWindowPos($dvW, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010)
+      Log "watchdog SetWindowPos afterDefView=$dvW res=$spW"
+    } else {
+      $spW = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
+      Log "watchdog SetWindowPos HWND_BOTTOM res=$spW"
+    }
+    [void][WinDesktopApi]::ShowWindow($child, 5)
+    [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
+    [void][WinDesktopApi]::UpdateWindow($child)
+    Log "watchdog re-attached: parent=$([WinDesktopApi]::GetParent($child)) visible=$([WinDesktopApi]::IsWindowVisible($child))"
+  } else {
+    Log "watchdog ok: parent=$wP visible=$wV layered=$isLayered"
+  }
+}
+Log "watchdog exit (20s window done)"
 } catch {
   Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
 }

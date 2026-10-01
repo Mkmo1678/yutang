@@ -5,7 +5,11 @@ const path = require('node:path');
 // v2.5.3: 禁用 GPU 合成（保留 WebGL 渲染）。SetParent 到 WorkerW 桌面层后
 // Chromium 的 DComp 合成与桌面合成器冲突，是窗口消失/黑屏/崩溃的高发根因；
 // 关闭 GPU 合成走软件合成，可根治此面，动画性能影响较小。
-app.commandLine.appendSwitch('disable-gpu-compositing');
+// v3.0.7: 去掉 disable-gpu-compositing——软件渲染窗口 SetParent 到 Progman 后内容不上屏
+// （v3.0.6 屏幕截图证实：窗口挂载成功、Z 序正确，但屏幕只有壁纸和图标）。
+// v2.5.2 的崩溃组合是“GPU合成 + WS_EX_LAYERED + SetParent”，attach 时已去掉 layered，
+// GPU+去layered+SetParent 是全新组合，DComp 合成器能正确把内容提交给桌面层。
+// 若仍崩溃，可加回：app.commandLine.appendSwitch('disable-gpu-compositing');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
@@ -133,15 +137,15 @@ function applyDesktopMode(enabled) {
     logToFile('desktop', `setDesktopLevel(true) from=applyDesktopMode hwnd=${pondWindow.getNativeWindowHandle()?.readBigUInt64LE?.(0)?.toString?.() || ''}`);
     nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), true).then(() => {
       logToFile('desktop', 'setDesktopLevel(attach) promise resolved');
-      // v3.0.6: attach 完成后才调度 repaint——之前 1s repaint 在 attach 的 PowerShell
-      // 完成前就并发执行（attach 需约1.5s），ShowWindow/重绘与 SetParent/SetWindowPos 竞争
-      // 可能干扰挂载；现在等挂载完成再逐次重绘
-      [1000, 3000, 5000].forEach((ms) => setTimeout(() => {
-        try { if (!pondWindow || pondWindow.isDestroyed() || !state.desktopMode) return; nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), 'repaint'); } catch {}
-      }, ms));
     }).catch((e) => {
       logToFile('desktop', `setDesktopLevel(attach) rejected: ${String(e)}`);
     });
+    // v3.0.7: repaint 用固定延迟（attach 约1.5s完成，2.5s/4.5s/6.5s 重绘避开挂载期）。
+    // attach 的 PowerShell 带 20s watchdog（防 Chromium 撤销 SetParent），promise 会被拖住，
+    // 所以不再依赖 promise resolved 后再调度。
+    [2500, 4500, 6500].forEach((ms) => setTimeout(() => {
+      try { if (!pondWindow || pondWindow.isDestroyed() || !state.desktopMode) return; nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), 'repaint'); } catch {}
+    }, ms));
     // v3.0.3: attach 后 4s 截图验证渲染，保存 %TEMP%\yutang-attach-shot.png
     setTimeout(() => {
       try {
