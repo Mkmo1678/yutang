@@ -133,13 +133,15 @@ function applyDesktopMode(enabled) {
     logToFile('desktop', `setDesktopLevel(true) from=applyDesktopMode hwnd=${pondWindow.getNativeWindowHandle()?.readBigUInt64LE?.(0)?.toString?.() || ''}`);
     nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), true).then(() => {
       logToFile('desktop', 'setDesktopLevel(attach) promise resolved');
+      // v3.0.6: attach 完成后才调度 repaint——之前 1s repaint 在 attach 的 PowerShell
+      // 完成前就并发执行（attach 需约1.5s），ShowWindow/重绘与 SetParent/SetWindowPos 竞争
+      // 可能干扰挂载；现在等挂载完成再逐次重绘
+      [1000, 3000, 5000].forEach((ms) => setTimeout(() => {
+        try { if (!pondWindow || pondWindow.isDestroyed() || !state.desktopMode) return; nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), 'repaint'); } catch {}
+      }, ms));
     }).catch((e) => {
       logToFile('desktop', `setDesktopLevel(attach) rejected: ${String(e)}`);
     });
-    // v3.0.3: 软件渲染在 SetParent 后可能只刷一帧，1s/3s/5s 强制重绘保持画面
-    [1000, 3000, 5000].forEach((ms) => setTimeout(() => {
-      try { if (!pondWindow || pondWindow.isDestroyed() || !state.desktopMode) return; nativeWindow.setDesktopLevel(pondWindow.getNativeWindowHandle(), 'repaint'); } catch {}
-    }, ms));
     // v3.0.3: attach 后 4s 截图验证渲染，保存 %TEMP%\yutang-attach-shot.png
     setTimeout(() => {
       try {
@@ -165,6 +167,11 @@ function applyDesktopMode(enabled) {
       if (!pondWindow || pondWindow.isDestroyed()) { logToFile('desktop', 'post-attach 6s: window destroyed'); return; }
       logToFile('desktop', `post-attach 6s: visible=${pondWindow.isVisible()} bounds=${JSON.stringify(pondWindow.getBounds())} desktopMode=${state.desktopMode}`);
     }, 6000);
+    // v3.0.6: 15s 长程自检——v3.0.5 用户 attach 后约9秒窗口消失，需确认窗口是否持续存活
+    setTimeout(() => {
+      if (!pondWindow || pondWindow.isDestroyed()) { logToFile('desktop', 'post-attach 15s: window destroyed'); return; }
+      logToFile('desktop', `post-attach 15s: visible=${pondWindow.isVisible()} bounds=${JSON.stringify(pondWindow.getBounds())} desktopMode=${state.desktopMode}`);
+    }, 15000);
     if (isMac) app.dock.hide();
   } else {
     logToFile('desktop', `setDesktopLevel(false) from=applyDesktopMode`);

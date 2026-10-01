@@ -64,7 +64,9 @@ if ($mode -eq 'repaint') {
   [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
   [void][WinDesktopApi]::UpdateWindow($child)
   [void][WinDesktopApi]::ShowWindow($child, 5)
-  Log "repaint done"
+  $visR = [WinDesktopApi]::IsWindowVisible($child)
+  $curPR = [WinDesktopApi]::GetParent($child)
+  Log "repaint done visible=$visR parent=$curPR"
   exit 0
 }
 
@@ -250,6 +252,20 @@ function Get-ZChildren($root) {
 Log "attach complete. progman children z-order: $(Get-ZChildren $script:progman)"
 $curP = [WinDesktopApi]::GetParent($child)
 Log "final parent=$curP (expected=$parent)"
+# v3.0.6: 抓取实际屏幕保存 PNG——验证用户真正看到的画面（图标/壁纸/窗口内容是否上屏）
+try {
+  Add-Type -AssemblyName System.Drawing
+  $sb2 = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $bmp = New-Object System.Drawing.Bitmap($sb2.Width, $sb2.Height)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($sb2.Location, [System.Drawing.Point]::Empty, $sb2.Size)
+  $shotPath = Join-Path $env:TEMP 'yutang-screen-shot.png'
+  $bmp.Save($shotPath, [System.Drawing.Imaging.ImageFormat]::Png)
+  $g.Dispose(); $bmp.Dispose()
+  Log "screen shot saved -> $shotPath"
+} catch {
+  Log "screen shot failed: $($_.Exception.Message)"
+}
 } catch {
   Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
 }
@@ -269,7 +285,7 @@ function setDesktopLevel(handle, enabled) {
     try {
       const child = spawn(
         psExe,
-        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Sta', '-EncodedCommand', encoded],
         { windowsHide: true, detached: false }
       );
       child.on('error', (e) => {
