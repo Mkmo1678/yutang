@@ -75,23 +75,29 @@ $hDesk = [WinDesktopApi]::OpenInputDesktop(0, $false, 0x01FF)
 Log "OpenInputDesktop=$hDesk"
 if ($hDesk -ne [IntPtr]::Zero) { [void][WinDesktopApi]::SetThreadDesktop($hDesk) }
 
-# 枚举所有顶层窗口，找 Progman、第一个 WorkerW、带 SHELLDLL_DefView 的窗口
+# 枚举所有顶层窗口，找 Progman、WorkerW（区分可见/不可见）、带 SHELLDLL_DefView 的窗口
 $script:progman = [IntPtr]::Zero
 $script:defOwner = [IntPtr]::Zero
 $script:firstWorker = [IntPtr]::Zero
+$script:firstVisibleWorker = [IntPtr]::Zero
+$script:workerCount = 0
 $cb = [WinDesktopApi+EnumWindowsProc]{
   param($h, $l)
   $sb = New-Object System.Text.StringBuilder 256
   [void][WinDesktopApi]::GetClassName($h, $sb, 256)
   $cn = $sb.ToString()
   if ($cn -eq 'Progman') { $script:progman = $h }
-  if ($cn -eq 'WorkerW' -and $script:firstWorker -eq [IntPtr]::Zero) { $script:firstWorker = $h }
+  if ($cn -eq 'WorkerW') {
+    $script:workerCount++
+    if ($script:firstWorker -eq [IntPtr]::Zero) { $script:firstWorker = $h }
+    if ($script:firstVisibleWorker -eq [IntPtr]::Zero -and [WinDesktopApi]::IsWindowVisible($h)) { $script:firstVisibleWorker = $h }
+  }
   $dv = [WinDesktopApi]::FindWindowEx($h, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
   if ($dv -ne [IntPtr]::Zero) { $script:defOwner = $h }
   return $true
 }
 [void][WinDesktopApi]::EnumWindows($cb, [IntPtr]::Zero)
-Log "enum: progman=$($script:progman) defOwner=$($script:defOwner) firstWorker=$($script:firstWorker)"
+Log "enum: progman=$($script:progman) defOwner=$($script:defOwner) workers=$($script:workerCount) firstWorker=$($script:firstWorker) firstVisibleWorker=$($script:firstVisibleWorker) progmanVisible=$([WinDesktopApi]::IsWindowVisible($script:progman))"
 
 # 让 Progman 创建 WorkerW 壁纸层
 if ($script:progman -ne [IntPtr]::Zero) {
@@ -116,19 +122,25 @@ $cb2 = [WinDesktopApi+EnumWindowsProc]{
 [void][WinDesktopApi]::EnumWindows($cb2, [IntPtr]::Zero)
 Log "re-enum: defOwner2=$($script:defOwner2)"
 
-# 找 SHELLDLL_DefView 后面的 WorkerW（正确的壁纸层位置）
+# v2.5.4: 只挂可见的父窗口。0x052C 在本机未创建新 WorkerW 时，firstWorker
+# 可能是隐藏 WorkerW，子窗口随之不可见（IsWindowVisible=False = 用户看到的“闪退”）
 $parent = [IntPtr]::Zero
-if ($script:defOwner2 -ne [IntPtr] -and $script:defOwner2 -ne [IntPtr]::Zero) {
-  $parent = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $script:defOwner2, 'WorkerW', [IntPtr]::Zero)
-  Log "FindWindowEx after defOwner2 -> $parent"
+if ($script:defOwner2 -ne [IntPtr]::Zero) {
+  $cand = [WinDesktopApi]::FindWindowEx([IntPtr]::Zero, $script:defOwner2, 'WorkerW', [IntPtr]::Zero)
+  Log "FindWindowEx after defOwner2 -> $cand visible=$([WinDesktopApi]::IsWindowVisible($cand))"
+  if ($cand -ne [IntPtr]::Zero -and [WinDesktopApi]::IsWindowVisible($cand)) { $parent = $cand }
+}
+if ($parent -eq [IntPtr]::Zero -and $script:firstVisibleWorker -ne [IntPtr]::Zero) {
+  $parent = $script:firstVisibleWorker
+  Log "fallback to firstVisibleWorker=$parent"
+}
+if ($parent -eq [IntPtr]::Zero -and $script:progman -ne [IntPtr]::Zero -and [WinDesktopApi]::IsWindowVisible($script:progman)) {
+  $parent = $script:progman
+  Log "fallback to visible progman=$parent"
 }
 if ($parent -eq [IntPtr]::Zero -and $script:firstWorker -ne [IntPtr]::Zero) {
   $parent = $script:firstWorker
-  Log "fallback to firstWorker=$parent"
-}
-if ($parent -eq [IntPtr]::Zero -and $script:progman -ne [IntPtr]::Zero) {
-  $parent = $script:progman
-  Log "final fallback to progman=$parent"
+  Log "last fallback to firstWorker=$parent"
 }
 
 Log "chosen parent=$parent"
@@ -163,7 +175,19 @@ Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height)"
 # v2.5.3: 去 layered 后 Chromium 可能不主动重绘窗口表面，强制重绘让画面立刻出现
 [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
 [void][WinDesktopApi]::UpdateWindow($child)
-Log "invalidate+update done, visible=$([WinDesktopApi]::IsWindowVisible($child))"
+$vis1 = [WinDesktopApi]::IsWindowVisible($child)
+Log "invalidate+update done, visible=$vis1 parent=$parent"
+# v2.5.4: 挂到隐藏 WorkerW 时子窗口不可见（用户看不到鱼塘=“闪退”），
+# 自动改挂可见的 Progman（图标在 DefView 层，窗口压 HWND_BOTTOM 则图标仍在窗口之上）
+if (-not $vis1 -and $script:progman -ne [IntPtr]::Zero -and [WinDesktopApi]::IsWindowVisible($script:progman)) {
+  Log "visible check failed -> retry attach to progman=$($script:progman)"
+  [void][WinDesktopApi]::SetParent($child, $script:progman)
+  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+  [void][WinDesktopApi]::ShowWindow($child, 5)
+  [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
+  [void][WinDesktopApi]::UpdateWindow($child)
+  Log "retry progman done, visible=$([WinDesktopApi]::IsWindowVisible($child))"
+}
 Log "attach complete"
 } catch {
   Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
