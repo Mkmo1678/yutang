@@ -317,27 +317,37 @@ function setDesktopLevel(handle, enabled) {
     const hwnd = handle.readBigUInt64LE(0).toString();
     const mode = enabled === 'repaint' ? 'repaint' : (!!enabled ? 'attach' : 'detach');
     const script = buildPowerShell(hwnd, mode);
-    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    // v3.0.9: 不用 EncodedCommand——脚本变长后 base64 超 32767 字符，Windows 命令行被截断
+    // （v3.0.7/8 的 encLen=37628 > 32767，PowerShell 启动但收不到完整脚本，PS-START 缺失）。
+    // 改为写临时 .ps1 文件 + -File 执行，命令行只有文件路径，无长度限制。
+    const scriptPath = path.join(process.env.TEMP || '/tmp', `yutang-win-${mode}-${hwnd}.ps1`);
+    try {
+      // 加 UTF-8 BOM：Windows PowerShell 5.1 读无 BOM 文件按 ANSI，BOM 保证脚本原样解析
+      fs.writeFileSync(scriptPath, '\uFEFF' + script, 'utf8');
+    } catch (e) {
+      try {
+        const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
+        fs.appendFileSync(logPath, `${new Date().toISOString()} PS-SCRIPT-WRITE-FAIL ${String(e)}\n`);
+      } catch {}
+      return resolve();
+    }
     const psExe = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
     try {
-      // v3.0.8: spawn 前记录关键参数——若脚本根本没执行（v3.0.7 的 5ms 静默退出），
-      // 从这里能看到进程是否启动、encoded 长度、退出码与耗时
+      // v3.0.8: spawn 前记录关键参数——若脚本根本没执行，从这里能看到进程是否启动
       const t0 = Date.now();
       try {
-        const fs = require('node:fs');
-        const path = require('node:path');
         const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
-        fs.appendFileSync(logPath, `${new Date().toISOString()} PS-SPAWN mode=${mode} hwnd=${hwnd} scriptLen=${script.length} encLen=${encoded.length} psExe=${psExe}\n`);
+        fs.appendFileSync(logPath, `${new Date().toISOString()} PS-SPAWN mode=${mode} hwnd=${hwnd} scriptLen=${script.length} psPath=${scriptPath}\n`);
       } catch {}
       const child = spawn(
         psExe,
-        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Sta', '-EncodedCommand', encoded],
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Sta', '-File', scriptPath],
         { windowsHide: true, detached: false, stdio: ['ignore', 'ignore', 'pipe'] }
       );
       child.on('error', (e) => {
         try {
-          const fs = require('node:fs');
-          const path = require('node:path');
           const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
           fs.appendFileSync(logPath, `${new Date().toISOString()} PS-SPAWN-ERROR ${e.message} (elapsed ${Date.now() - t0}ms)\n`);
         } catch {}
@@ -351,8 +361,6 @@ function setDesktopLevel(handle, enabled) {
       } catch {}
       child.on('close', (code) => {
         try {
-          const fs = require('node:fs');
-          const path = require('node:path');
           const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
           fs.appendFileSync(logPath, `${new Date().toISOString()} PS-CLOSE code=${code} elapsed=${Date.now() - t0}ms stderrLen=${psErr.length}\n`);
           if (psErr) {
