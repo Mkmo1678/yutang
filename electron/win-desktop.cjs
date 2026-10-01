@@ -196,6 +196,9 @@ if ($defView -ne [IntPtr]::Zero) {
     $spRes2 = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
     Log "SetWindowPos fallback HWND_BOTTOM res=$spRes2"
   }
+  # v3.0.5: 双保险——把 DefView（图标层）提到 Progman 子窗口最前，图标强制在摸鱼窗口之上
+  $dvTop = [WinDesktopApi]::SetWindowPos($defView, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010)
+  Log "DefView raised to top res=$dvTop"
 } else {
   $spRes = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
   Log "SetWindowPos HWND_BOTTOM res=$spRes (no defView)"
@@ -217,6 +220,8 @@ if (-not $vis1 -and $script:progman -ne [IntPtr]::Zero -and [WinDesktopApi]::IsW
   if ($defView2 -ne [IntPtr]::Zero) {
     $spR = [WinDesktopApi]::SetWindowPos($child, $defView2, 0, 0, $b.Width, $b.Height, $spFlags)
     Log "retry SetWindowPos afterDefView=$defView2 res=$spR"
+    $dvTop2 = [WinDesktopApi]::SetWindowPos($defView2, [IntPtr]::Zero, 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010)
+    Log "retry DefView raised to top res=$dvTop2"
   } else {
     $spR = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
     Log "retry SetWindowPos HWND_BOTTOM res=$spR"
@@ -237,7 +242,7 @@ function Get-ZChildren($root) {
     $kind = ''
     if ($h -eq $child) { $kind = '[OUR-WINDOW]' }
     elseif ($sb.ToString() -eq 'SHELLDLL_DefView') { $kind = '[DefView-ICONS]' }
-    [void]$parts.Add("$h:$($sb.ToString())$kind")
+    [void]$parts.Add("$($h):$($sb.ToString())$kind")
     $h = [WinDesktopApi]::GetWindow($h, 2)  # GW_HWNDNEXT
   }
   return ($parts -join ' > ')
