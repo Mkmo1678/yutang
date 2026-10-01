@@ -28,6 +28,8 @@ public class WinDesktopApi {
   [DllImport("user32.dll")]
   public static extern IntPtr SetParent(IntPtr c, IntPtr p);
   [DllImport("user32.dll")]
+  public static extern IntPtr GetParent(IntPtr h);
+  [DllImport("user32.dll")]
   public extern static bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")]
   public static extern int GetWindowLong(IntPtr h, int idx);
@@ -182,17 +184,21 @@ Add-Type -AssemblyName System.Windows.Forms
 $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 Log("screen bounds: $($b.Width)x$($b.Height) at $($b.X),$($b.Y)")
 
-# SetWindowPos: v3.0.3 优先把窗口插到 Progman 的 DefView（图标层）之后，
-# 图标永远显示在窗口之上；找不到 DefView 才压 HWND_BOTTOM(1)。
-# （此前挂 Progman 用 HWND_TOP 盖住图标、用 HWND_BOTTOM 在个别系统仍被 Explorer 重排）
-# flags: SWP_NOACTIVATE(0x0010) | SWP_ASYNCWINDOWPOS(0x4000) | SWP_SHOWWINDOW(0x0040)
+# SetWindowPos: v3.0.4 同步执行（去掉 SWP_ASYNCWINDOWPOS——异步在 SetParent 后可能失败/乱序），
+# 记录返回值；优先插到 DefView 图标层之后，失败则压 HWND_BOTTOM。
+# flags: SWP_NOACTIVATE(0x0010) | SWP_SHOWWINDOW(0x0040)
 $defView = [WinDesktopApi]::FindWindowEx($script:progman, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
+$spFlags = 0x0010 -bor 0x0040
 if ($defView -ne [IntPtr]::Zero) {
-  [void][WinDesktopApi]::SetWindowPos($child, $defView, 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
-  Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height) afterDefView=$defView"
+  $spRes = [WinDesktopApi]::SetWindowPos($child, $defView, 0, 0, $b.Width, $b.Height, $spFlags)
+  Log "SetWindowPos afterDefView=$defView res=$spRes"
+  if (-not $spRes) {
+    $spRes2 = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
+    Log "SetWindowPos fallback HWND_BOTTOM res=$spRes2"
+  }
 } else {
-  [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
-  Log "SetWindowPos done to 0,0 $($b.Width)x$($b.Height) bottom=true (no defView)"
+  $spRes = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
+  Log "SetWindowPos HWND_BOTTOM res=$spRes (no defView)"
 }
 
 # 确保窗口可见且不被激活
@@ -209,10 +215,11 @@ if (-not $vis1 -and $script:progman -ne [IntPtr]::Zero -and [WinDesktopApi]::IsW
   [void][WinDesktopApi]::SetParent($child, $script:progman)
   $defView2 = [WinDesktopApi]::FindWindowEx($script:progman, [IntPtr]::Zero, 'SHELLDLL_DefView', $null)
   if ($defView2 -ne [IntPtr]::Zero) {
-    [void][WinDesktopApi]::SetWindowPos($child, $defView2, 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
-    Log "retry SetWindowPos afterDefView=$defView2"
+    $spR = [WinDesktopApi]::SetWindowPos($child, $defView2, 0, 0, $b.Width, $b.Height, $spFlags)
+    Log "retry SetWindowPos afterDefView=$defView2 res=$spR"
   } else {
-    [void][WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, 0x0010 -bor 0x4000 -bor 0x0040)
+    $spR = [WinDesktopApi]::SetWindowPos($child, [IntPtr]::new(1), 0, 0, $b.Width, $b.Height, $spFlags)
+    Log "retry SetWindowPos HWND_BOTTOM res=$spR"
   }
   [void][WinDesktopApi]::ShowWindow($child, 5)
   [void][WinDesktopApi]::InvalidateRect($child, [IntPtr]::Zero, $false)
@@ -236,6 +243,8 @@ function Get-ZChildren($root) {
   return ($parts -join ' > ')
 }
 Log "attach complete. progman children z-order: $(Get-ZChildren $script:progman)"
+$curP = [WinDesktopApi]::GetParent($child)
+Log "final parent=$curP (expected=$parent)"
 } catch {
   Log "FATAL ERROR: $($_.Exception.Message) -- $($_.ScriptStackTrace)"
 }
@@ -267,7 +276,23 @@ function setDesktopLevel(handle, enabled) {
         } catch {}
         resolve();
       });
-      child.on('close', (code) => resolve());
+      // v3.0.4: 捕获 PowerShell 的 stderr（脚本解析失败等错误），写进 desktop.log 定位问题
+      let psErr = '';
+      try {
+        child.stderr?.setEncoding('utf8');
+        child.stderr?.on('data', (d) => { psErr += d; });
+      } catch {}
+      child.on('close', (code) => {
+        if (psErr) {
+          try {
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
+            fs.appendFileSync(logPath, `${new Date().toISOString()} ps stderr(${code}): ${psErr.slice(0, 1500)}\n`);
+          } catch {}
+        }
+        resolve();
+      });
       // 30秒超时兜底
       setTimeout(() => resolve(), 30000).unref?.();
     } catch (e) {
