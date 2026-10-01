@@ -57,6 +57,9 @@ public class WinDesktopApi {
 '@
 $child = [IntPtr][int64]'${hwnd}'
 $mode = '${mode}'
+# v3.0.8: 启动标记——用 .NET 直接写文件（不依赖函数/Add-Type），
+# 若此条缺失 = PowerShell 根本没执行到脚本（EncodedCommand 失败/进程被拦截）
+try { [System.IO.File]::AppendAllText((Join-Path $env:TEMP 'yutang-desktop.log'), ("[$([DateTime]::Now.ToString('o'))] PS-START mode=$mode hwnd=${hwnd}" + [Environment]::NewLine)) } catch {}
 Log "start mode=$mode child=$child isValid=$([WinDesktopApi]::IsWindow($child))"
 
 # ---- repaint 模式：不改变父窗口/样式，只强制重绘（软件渲染在 SetParent 后可能只刷一帧）----
@@ -317,17 +320,26 @@ function setDesktopLevel(handle, enabled) {
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const psExe = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
     try {
+      // v3.0.8: spawn 前记录关键参数——若脚本根本没执行（v3.0.7 的 5ms 静默退出），
+      // 从这里能看到进程是否启动、encoded 长度、退出码与耗时
+      const t0 = Date.now();
+      try {
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
+        fs.appendFileSync(logPath, `${new Date().toISOString()} PS-SPAWN mode=${mode} hwnd=${hwnd} scriptLen=${script.length} encLen=${encoded.length} psExe=${psExe}\n`);
+      } catch {}
       const child = spawn(
         psExe,
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Sta', '-EncodedCommand', encoded],
-        { windowsHide: true, detached: false }
+        { windowsHide: true, detached: false, stdio: ['ignore', 'ignore', 'pipe'] }
       );
       child.on('error', (e) => {
         try {
           const fs = require('node:fs');
           const path = require('node:path');
           const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
-          fs.appendFileSync(logPath, `${new Date().toISOString()} spawn error: ${e.message}\n`);
+          fs.appendFileSync(logPath, `${new Date().toISOString()} PS-SPAWN-ERROR ${e.message} (elapsed ${Date.now() - t0}ms)\n`);
         } catch {}
         resolve();
       });
@@ -338,14 +350,15 @@ function setDesktopLevel(handle, enabled) {
         child.stderr?.on('data', (d) => { psErr += d; });
       } catch {}
       child.on('close', (code) => {
-        if (psErr) {
-          try {
-            const fs = require('node:fs');
-            const path = require('node:path');
-            const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
+        try {
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const logPath = path.join(process.env.TEMP || '/tmp', 'yutang-desktop.log');
+          fs.appendFileSync(logPath, `${new Date().toISOString()} PS-CLOSE code=${code} elapsed=${Date.now() - t0}ms stderrLen=${psErr.length}\n`);
+          if (psErr) {
             fs.appendFileSync(logPath, `${new Date().toISOString()} ps stderr(${code}): ${psErr.slice(0, 1500)}\n`);
-          } catch {}
-        }
+          }
+        } catch {}
         resolve();
       });
       // 30秒超时兜底
