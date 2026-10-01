@@ -90,7 +90,7 @@ function describeInteraction() {
   if (state.globalInteractionStatus === 'awaiting-permission') return '请在系统设置 → 隐私与安全性 → 辅助功能中允许本应用，然后返回；也可继续使用窗口内互动。';
   if (state.globalInteractionStatus === 'error') return '系统未允许鼠标监听。可在系统设置检查辅助功能／输入监控，或使用窗口内互动。';
   if (state.globalInteractionStatus === 'unavailable') return '此版本无法监听全局点击。桌面中可恢复控制窗口互动。';
-  return state.desktopMode ? '桌面已开启鼠标穿透。开启全局点击可与当前主题互动；⌘/Ctrl+Shift+K 恢复控制。' : '窗口内点击即可与当前主题互动。桌面模式可从菜单栏锦鲤图标恢复。';
+  return state.desktopMode ? '桌面模式：按 Ctrl+Shift+F 投喂食物；Ctrl+Shift+K 恢复控制窗口互动。' : '窗口内点击即可与当前主题互动。桌面模式可从托盘锦鲤图标切换。';
 }
 
 function sendPointer(type, point, source, fallbackCenter = false) {
@@ -366,7 +366,7 @@ function updateTray() {
     { label: '打开风景控制台', accelerator: SHORTCUT, click: showControls },
     { label: '融入桌面', type: 'checkbox', checked: state.desktopMode, enabled: state.desktopSupported, click: (item) => { try { logToFile('desktop', `tray click 融入桌面 -> ${item.checked}`); } catch {} setDesktopMode(item.checked); } },
     { label: '隐藏风景窗口', click: hideWindow },
-    { label: '主题快捷互动', accelerator: FEED_SHORTCUT, click: () => feed('tray') },
+    { label: '投喂食物', accelerator: FEED_SHORTCUT, click: () => feed('tray') },
     { type: 'separator' },
     { label: '全局点击互动（需系统授权）', type: 'checkbox', checked: state.globalInteraction, enabled: isMac && fs.existsSync(pointerPath), click: (item) => setGlobalInteraction(item.checked) },
     { label: '登录时启动', type: 'checkbox', checked: state.launchAtLogin, enabled: state.launchAtLoginSupported, click: (item) => setLaunchAtLogin(item.checked) },
